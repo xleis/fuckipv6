@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Brand ground: flat cream paper (#F2EDE2), the product brand colour. The
+     design system forbids depth effects, so this layer is a plain fill with
+     only the faintest warm edge to keep the glyph readable on dark launchers. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:pathData="M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="0"
+                android:startY="0"
+                android:endX="108"
+                android:endY="108"
+                android:startColor="#FFF7F3EA"
+                android:centerColor="#FFF2EDE2"
+                android:endColor="#FFE9E2D3" />
+        </aapt:attr>
+    </path>
+</vector>

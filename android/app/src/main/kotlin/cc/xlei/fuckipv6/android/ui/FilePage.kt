@@ -70,7 +70,7 @@ fun FilePageContent(
                     contracts = contracts,
                     locale = locale,
                     testTag = "file-capability-network",
-                    labelKey = "file.page.target.title",
+                    labelKey = "settings.row.file_network",
                     value = network,
                 )
             }
@@ -78,7 +78,7 @@ fun FilePageContent(
                 contracts = contracts,
                 locale = locale,
                 testTag = "file-capability-transfers",
-                labelKey = "file.page.uploading",
+                labelKey = "settings.row.file_active_transfers",
                 value = data.activeTransfers.toString(),
             )
             data.formattedAvailable?.let { available ->
@@ -86,29 +86,59 @@ fun FilePageContent(
                     contracts = contracts,
                     locale = locale,
                     testTag = "file-capability-available",
-                    labelKey = "file.page.upload_limit",
+                    labelKey = "file.page.local_state.available",
                     value = available,
                 )
             }
-            data.rootErrorCode?.let { code ->
+            data.rootErrorCode?.let {
                 Text(
                     modifier = Modifier.testTag("file-capability-root-error"),
-                    text = code,
+                    text = contracts.i18n.translate(
+                        locale,
+                        "file.page.local_state.root_error",
+                    ),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
                 )
             }
 
-            if (data.shareRevision != null || data.accessEpoch != null) {
-                Text(
-                    modifier = Modifier.testTag("file-capability-revisions"),
-                    text = listOfNotNull(
-                        data.shareRevision?.let { "share_revision=$it" },
-                        data.accessEpoch?.let { "access_epoch=$it" },
-                    ).joinToString(" · "),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+            if (data.shareRevision != null ||
+                data.accessEpoch != null ||
+                data.rootErrorCode != null
+            ) {
+                TechnicalDetails(
+                    contracts = contracts,
+                    locale = locale,
+                    testTagPrefix = "file-tech-details",
+                ) {
+                    data.shareRevision?.let { revision ->
+                        TechValue(
+                            label = contracts.i18n.translate(
+                                locale,
+                                "file.page.local_state.share_revision",
+                            ),
+                            value = revision.toString(),
+                        )
+                    }
+                    data.accessEpoch?.let { epoch ->
+                        TechValue(
+                            label = contracts.i18n.translate(
+                                locale,
+                                "file.page.local_state.access_epoch",
+                            ),
+                            value = epoch.toString(),
+                        )
+                    }
+                    data.rootErrorCode?.let { code ->
+                        TechValue(
+                            label = contracts.i18n.translate(
+                                locale,
+                                "file.page.transfer.error_code",
+                            ),
+                            value = code,
+                        )
+                    }
+                }
             }
             Text(
                 text = contracts.i18n.translate(locale, "file.page.local_state.detail"),
@@ -136,16 +166,22 @@ private fun FileDetailRow(
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
+            modifier = Modifier.weight(1f, fill = false),
             text = contracts.i18n.translate(locale, labelKey),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Text(
-            modifier = Modifier.testTag(testTag),
+            modifier = Modifier
+                .padding(start = 12.dp)
+                .testTag(testTag),
             text = value,
             style = MaterialTheme.typography.bodyMedium,
+            maxLines = 1,
+            softWrap = false,
         )
     }
 }

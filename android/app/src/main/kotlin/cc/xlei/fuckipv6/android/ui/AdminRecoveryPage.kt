@@ -84,11 +84,6 @@ fun AdminRecoveryPageContent(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                AdminRecoveryDetail(
-                    label = contracts.i18n.translate(locale, "admin_recovery.network_id"),
-                    value = data.networkId
-                        ?: contracts.i18n.translate(locale, "common.not_available"),
-                )
                 if (!data.backendAvailable) {
                     Text(
                         modifier = Modifier.testTag("admin-recovery-unavailable"),
@@ -100,351 +95,22 @@ fun AdminRecoveryPageContent(
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
-            }
-        }
-
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(
-                modifier = Modifier.padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Text(
-                    modifier = Modifier.semantics { heading() },
-                    text = contracts.i18n.translate(locale, "action.submit_admin_recovery"),
-                    style = MaterialTheme.typography.titleMedium,
-                )
-                Text(
-                    text = contracts.i18n.translate(locale, "admin_recovery.request_json_help"),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                OutlinedTextField(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("admin-recovery-request-json"),
-                    value = requestJson,
-                    onValueChange = {
-                        requestJson = it
-                        validationKey = null
-                    },
-                    label = {
-                        Text(
-                            contracts.i18n.translate(
-                                locale,
-                                "field.admin_recovery_request_json",
-                            ),
-                        )
-                    },
-                    placeholder = {
-                        Text(
-                            contracts.i18n.translate(
-                                locale,
-                                "placeholder.admin_recovery_request_json",
-                            ),
-                        )
-                    },
-                    minLines = 6,
-                    maxLines = 12,
-                )
-                Button(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("admin-recovery-submit"),
-                    enabled = data.backendAvailable &&
-                        data.onSubmit != null &&
-                        requestJson.isNotBlank(),
-                    onClick = {
-                        validationKey = null
-                        pendingSubmit = runCatching {
-                            AdminRecoveryRequestCodec.parse(requestJson)
-                        }.getOrElse {
-                            validationKey =
-                                "validation.admin_recovery_request_json_invalid"
-                            null
-                        }
-                    },
-                ) {
-                    Text(contracts.i18n.translate(locale, "action.submit_admin_recovery"))
-                }
-            }
-        }
-
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(
-                modifier = Modifier.padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Text(
-                    modifier = Modifier.semantics { heading() },
-                    text = contracts.i18n.translate(locale, "action.get_admin_recovery_status"),
-                    style = MaterialTheme.typography.titleMedium,
-                )
-                OutlinedTextField(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("admin-recovery-request-id"),
-                    value = requestId,
-                    onValueChange = {
-                        requestId = it
-                        validationKey = null
-                        pendingExecuteId = null
-                        executeStatusBaseline = null
-                    },
-                    singleLine = true,
-                    label = {
-                        Text(
-                            contracts.i18n.translate(
-                                locale,
-                                "field.admin_recovery_request_id",
-                            ),
-                        )
-                    },
-                    placeholder = {
-                        Text(
-                            contracts.i18n.translate(
-                                locale,
-                                "placeholder.admin_recovery_request_id",
-                            ),
-                        )
-                    },
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Button(
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("admin-recovery-status"),
-                        enabled = data.backendAvailable &&
-                            data.onGetStatus != null &&
-                            normalizedRequestId.isNotEmpty(),
-                        onClick = {
-                            if (!AdminRecoveryRequestCodec.validRequestId(normalizedRequestId)) {
-                                validationKey = "validation.admin_recovery_request_id_invalid"
-                            } else {
-                                validationKey = null
-                                data.onGetStatus?.invoke(
-                                    NodeAdminRecoveryStatusCommand(
-                                        data.networkName,
-                                        normalizedRequestId,
-                                    ),
-                                )
-                            }
-                        },
+                data.networkId?.let { networkId ->
+                    TechnicalDetails(
+                        contracts = contracts,
+                        locale = locale,
+                        testTagPrefix = "admin-recovery-network-details",
                     ) {
-                        Text(
-                            contracts.i18n.translate(
+                        TechValue(
+                            label = contracts.i18n.translate(
                                 locale,
-                                "action.get_admin_recovery_status",
+                                "admin_recovery.network_id",
                             ),
-                        )
-                    }
-                    Button(
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("admin-recovery-list"),
-                        enabled = data.backendAvailable && data.onList != null,
-                        onClick = {
-                            validationKey = null
-                            data.onList?.invoke(
-                                NodeAdminRecoveryListCommand(data.networkName),
-                            )
-                        },
-                    ) {
-                        Text(
-                            contracts.i18n.translate(
-                                locale,
-                                "action.list_admin_recoveries",
-                            ),
-                        )
-                    }
-                }
-
-                Button(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("admin-recovery-execute-preflight"),
-                    enabled = data.backendAvailable &&
-                        data.onGetStatus != null &&
-                        normalizedRequestId.isNotEmpty(),
-                    onClick = {
-                        if (!AdminRecoveryRequestCodec.validRequestId(normalizedRequestId)) {
-                            validationKey = "validation.admin_recovery_request_id_invalid"
-                        } else {
-                            validationKey = null
-                            pendingExecuteId = normalizedRequestId
-                            executeStatusBaseline = data.statusRefreshSequence
-                            data.onGetStatus?.invoke(
-                                NodeAdminRecoveryStatusCommand(
-                                    data.networkName,
-                                    normalizedRequestId,
-                                ),
-                            )
-                        }
-                    },
-                ) {
-                    Text(
-                        contracts.i18n.translate(
-                            locale,
-                            "action.execute_admin_recovery",
-                        ),
-                    )
-                }
-                if (pendingExecuteId != null && freshExecuteStatus == null) {
-                    Text(
-                        modifier = Modifier.testTag("admin-recovery-execute-waiting"),
-                        text = contracts.i18n.translate(
-                            locale,
-                            "admin_recovery.execution_preflight_waiting",
-                        ),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                if (freshExecuteStatus != null && executeBlockedKey != null) {
-                    Text(
-                        modifier = Modifier.testTag("admin-recovery-execute-blocked"),
-                        text = contracts.i18n.translate(locale, executeBlockedKey),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
-                if (freshExecuteStatus != null && executeBlockedKey == null) {
-                    Text(
-                        text = contracts.i18n.translate(
-                            locale,
-                            "confirm.execute_admin_recovery.consequence",
-                        ),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                    Button(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("admin-recovery-execute-confirm"),
-                        enabled = data.onExecute != null,
-                        onClick = {
-                            val request = pendingExecuteId ?: return@Button
-                            val status = freshExecuteStatus ?: return@Button
-                            if (status.requestId != request ||
-                                status.state != AdminRecoveryState.PENDING ||
-                                status.canExecute != true
-                            ) {
-                                return@Button
-                            }
-                            pendingExecuteId = null
-                            executeStatusBaseline = null
-                            data.onExecute?.invoke(
-                                NodeExecuteAdminRecoveryCommand(
-                                    data.networkName,
-                                    request,
-                                ),
-                            )
-                        },
-                    ) {
-                        Text(
-                            contracts.i18n.translate(
-                                locale,
-                                "action.execute_admin_recovery",
-                            ),
+                            value = networkId,
                         )
                     }
                 }
             }
-        }
-
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(
-                modifier = Modifier.padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Text(
-                    modifier = Modifier.semantics { heading() },
-                    text = contracts.i18n.translate(locale, "action.revoke_admin_recovery"),
-                    style = MaterialTheme.typography.titleMedium,
-                )
-                OutlinedTextField(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("admin-recovery-revoke-reason"),
-                    value = revocationReason,
-                    onValueChange = {
-                        revocationReason = it
-                        validationKey = null
-                    },
-                    minLines = 2,
-                    maxLines = 5,
-                    label = {
-                        Text(
-                            contracts.i18n.translate(
-                                locale,
-                                "field.admin_recovery_reason",
-                            ),
-                        )
-                    },
-                    placeholder = {
-                        Text(
-                            contracts.i18n.translate(
-                                locale,
-                                "placeholder.admin_recovery_reason",
-                            ),
-                        )
-                    },
-                )
-                Text(
-                    text = contracts.i18n.translate(
-                        locale,
-                        "admin_recovery.reason_counter",
-                        mapOf(
-                            "count" to revocationReason.codePointCount(
-                                0,
-                                revocationReason.length,
-                            ).toString(),
-                            "max" to ADMIN_RECOVERY_REASON_MAX.toString(),
-                        ),
-                    ),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Button(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("admin-recovery-revoke"),
-                    enabled = data.backendAvailable &&
-                        data.onRevoke != null &&
-                        normalizedRequestId.isNotEmpty() &&
-                        revocationReason.isNotEmpty(),
-                    onClick = {
-                        validationKey = when {
-                            !AdminRecoveryRequestCodec.validRequestId(normalizedRequestId) ->
-                                "validation.admin_recovery_request_id_invalid"
-                            !AdminRecoveryRequestCodec.validRevocationReason(
-                                revocationReason,
-                            ) -> "validation.admin_recovery_reason_invalid"
-                            else -> null
-                        }
-                        showRevokeConfirmation = validationKey == null
-                    },
-                ) {
-                    Text(
-                        contracts.i18n.translate(
-                            locale,
-                            "action.revoke_admin_recovery",
-                        ),
-                    )
-                }
-            }
-        }
-
-        validationKey?.let { key ->
-            Text(
-                modifier = Modifier.testTag("admin-recovery-validation-error"),
-                text = contracts.i18n.translate(locale, key),
-                color = MaterialTheme.colorScheme.error,
-                style = MaterialTheme.typography.bodySmall,
-            )
         }
 
         data.latestStatus?.let { status ->
@@ -461,6 +127,360 @@ fun AdminRecoveryPageContent(
             locale = locale,
             data = data,
         )
+
+        TechnicalDetails(
+            contracts = contracts,
+            locale = locale,
+            titleKey = "admin_recovery.advanced_title",
+            hintKey = "admin_recovery.advanced_hint",
+            testTagPrefix = "admin-recovery-advanced",
+        ) {
+
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text(
+                        modifier = Modifier.semantics { heading() },
+                        text = contracts.i18n.translate(locale, "action.submit_admin_recovery"),
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    Text(
+                        text = contracts.i18n.translate(locale, "admin_recovery.request_json_help"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    OutlinedTextField(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("admin-recovery-request-json"),
+                        value = requestJson,
+                        onValueChange = {
+                            requestJson = it
+                            validationKey = null
+                        },
+                        label = {
+                            Text(
+                                contracts.i18n.translate(
+                                    locale,
+                                    "field.admin_recovery_request_json",
+                                ),
+                            )
+                        },
+                        placeholder = {
+                            Text(
+                                contracts.i18n.translate(
+                                    locale,
+                                    "placeholder.admin_recovery_request_json",
+                                ),
+                            )
+                        },
+                        minLines = 6,
+                        maxLines = 12,
+                    )
+                    Button(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("admin-recovery-submit"),
+                        enabled = data.backendAvailable &&
+                            data.onSubmit != null &&
+                            requestJson.isNotBlank(),
+                        onClick = {
+                            validationKey = null
+                            pendingSubmit = runCatching {
+                                AdminRecoveryRequestCodec.parse(requestJson)
+                            }.getOrElse {
+                                validationKey =
+                                    "validation.admin_recovery_request_json_invalid"
+                                null
+                            }
+                        },
+                    ) {
+                        Text(contracts.i18n.translate(locale, "action.submit_admin_recovery"))
+                    }
+                }
+            }
+
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text(
+                        modifier = Modifier.semantics { heading() },
+                        text = contracts.i18n.translate(locale, "action.get_admin_recovery_status"),
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    OutlinedTextField(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("admin-recovery-request-id"),
+                        value = requestId,
+                        onValueChange = {
+                            requestId = it
+                            validationKey = null
+                            pendingExecuteId = null
+                            executeStatusBaseline = null
+                        },
+                        singleLine = true,
+                        label = {
+                            Text(
+                                contracts.i18n.translate(
+                                    locale,
+                                    "field.admin_recovery_request_id",
+                                ),
+                            )
+                        },
+                        placeholder = {
+                            Text(
+                                contracts.i18n.translate(
+                                    locale,
+                                    "placeholder.admin_recovery_request_id",
+                                ),
+                            )
+                        },
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Button(
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("admin-recovery-status"),
+                            enabled = data.backendAvailable &&
+                                data.onGetStatus != null &&
+                                normalizedRequestId.isNotEmpty(),
+                            onClick = {
+                                if (!AdminRecoveryRequestCodec.validRequestId(normalizedRequestId)) {
+                                    validationKey = "validation.admin_recovery_request_id_invalid"
+                                } else {
+                                    validationKey = null
+                                    data.onGetStatus?.invoke(
+                                        NodeAdminRecoveryStatusCommand(
+                                            data.networkName,
+                                            normalizedRequestId,
+                                        ),
+                                    )
+                                }
+                            },
+                        ) {
+                            Text(
+                                contracts.i18n.translate(
+                                    locale,
+                                    "action.get_admin_recovery_status",
+                                ),
+                            )
+                        }
+                        Button(
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("admin-recovery-list"),
+                            enabled = data.backendAvailable && data.onList != null,
+                            onClick = {
+                                validationKey = null
+                                data.onList?.invoke(
+                                    NodeAdminRecoveryListCommand(data.networkName),
+                                )
+                            },
+                        ) {
+                            Text(
+                                contracts.i18n.translate(
+                                    locale,
+                                    "action.list_admin_recoveries",
+                                ),
+                            )
+                        }
+                    }
+
+                    Button(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("admin-recovery-execute-preflight"),
+                        enabled = data.backendAvailable &&
+                            data.onGetStatus != null &&
+                            normalizedRequestId.isNotEmpty(),
+                        onClick = {
+                            if (!AdminRecoveryRequestCodec.validRequestId(normalizedRequestId)) {
+                                validationKey = "validation.admin_recovery_request_id_invalid"
+                            } else {
+                                validationKey = null
+                                pendingExecuteId = normalizedRequestId
+                                executeStatusBaseline = data.statusRefreshSequence
+                                data.onGetStatus?.invoke(
+                                    NodeAdminRecoveryStatusCommand(
+                                        data.networkName,
+                                        normalizedRequestId,
+                                    ),
+                                )
+                            }
+                        },
+                    ) {
+                        Text(
+                            contracts.i18n.translate(
+                                locale,
+                                "action.execute_admin_recovery",
+                            ),
+                        )
+                    }
+                    if (pendingExecuteId != null && freshExecuteStatus == null) {
+                        Text(
+                            modifier = Modifier.testTag("admin-recovery-execute-waiting"),
+                            text = contracts.i18n.translate(
+                                locale,
+                                "admin_recovery.execution_preflight_waiting",
+                            ),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (freshExecuteStatus != null && executeBlockedKey != null) {
+                        Text(
+                            modifier = Modifier.testTag("admin-recovery-execute-blocked"),
+                            text = contracts.i18n.translate(locale, executeBlockedKey),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                    if (freshExecuteStatus != null && executeBlockedKey == null) {
+                        Text(
+                            text = contracts.i18n.translate(
+                                locale,
+                                "confirm.execute_admin_recovery.consequence",
+                            ),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        Button(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("admin-recovery-execute-confirm"),
+                            enabled = data.onExecute != null,
+                            onClick = {
+                                val request = pendingExecuteId ?: return@Button
+                                val status = freshExecuteStatus ?: return@Button
+                                if (status.requestId != request ||
+                                    status.state != AdminRecoveryState.PENDING ||
+                                    status.canExecute != true
+                                ) {
+                                    return@Button
+                                }
+                                pendingExecuteId = null
+                                executeStatusBaseline = null
+                                data.onExecute?.invoke(
+                                    NodeExecuteAdminRecoveryCommand(
+                                        data.networkName,
+                                        request,
+                                    ),
+                                )
+                            },
+                        ) {
+                            Text(
+                                contracts.i18n.translate(
+                                    locale,
+                                    "action.execute_admin_recovery",
+                                ),
+                            )
+                        }
+                    }
+                }
+            }
+
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text(
+                        modifier = Modifier.semantics { heading() },
+                        text = contracts.i18n.translate(locale, "action.revoke_admin_recovery"),
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    OutlinedTextField(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("admin-recovery-revoke-reason"),
+                        value = revocationReason,
+                        onValueChange = {
+                            revocationReason = it
+                            validationKey = null
+                        },
+                        minLines = 2,
+                        maxLines = 5,
+                        label = {
+                            Text(
+                                contracts.i18n.translate(
+                                    locale,
+                                    "field.admin_recovery_reason",
+                                ),
+                            )
+                        },
+                        placeholder = {
+                            Text(
+                                contracts.i18n.translate(
+                                    locale,
+                                    "placeholder.admin_recovery_reason",
+                                ),
+                            )
+                        },
+                    )
+                    Text(
+                        text = contracts.i18n.translate(
+                            locale,
+                            "admin_recovery.reason_counter",
+                            mapOf(
+                                "count" to revocationReason.codePointCount(
+                                    0,
+                                    revocationReason.length,
+                                ).toString(),
+                                "max" to ADMIN_RECOVERY_REASON_MAX.toString(),
+                            ),
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Button(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("admin-recovery-revoke"),
+                        enabled = data.backendAvailable &&
+                            data.onRevoke != null &&
+                            normalizedRequestId.isNotEmpty() &&
+                            revocationReason.isNotEmpty(),
+                        onClick = {
+                            validationKey = when {
+                                !AdminRecoveryRequestCodec.validRequestId(normalizedRequestId) ->
+                                    "validation.admin_recovery_request_id_invalid"
+                                !AdminRecoveryRequestCodec.validRevocationReason(
+                                    revocationReason,
+                                ) -> "validation.admin_recovery_reason_invalid"
+                                else -> null
+                            }
+                            showRevokeConfirmation = validationKey == null
+                        },
+                    ) {
+                        Text(
+                            contracts.i18n.translate(
+                                locale,
+                                "action.revoke_admin_recovery",
+                            ),
+                        )
+                    }
+                }
+            }
+
+            validationKey?.let { key ->
+                Text(
+                    modifier = Modifier.testTag("admin-recovery-validation-error"),
+                    text = contracts.i18n.translate(locale, key),
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+
     }
 
     pendingSubmit?.let { request ->
@@ -487,7 +507,7 @@ fun AdminRecoveryPageContent(
                             locale,
                             "admin_recovery.impact.owner_after",
                         ),
-                        value = request.proposal.target.owner
+                        value = abbreviateId(request.proposal.target.owner)
                             ?: contracts.i18n.translate(locale, "common.not_available"),
                     )
                 }
@@ -668,18 +688,6 @@ private fun AdminRecoveryStatusCard(
             )
             Text(text = state, style = MaterialTheme.typography.titleMedium)
             AdminRecoveryDetail(
-                contracts.i18n.translate(locale, "field.admin_recovery_request_id"),
-                status.requestId ?: notAvailable,
-            )
-            AdminRecoveryDetail(
-                contracts.i18n.translate(locale, "admin_recovery.network_id"),
-                status.networkId ?: notAvailable,
-            )
-            AdminRecoveryDetail(
-                contracts.i18n.translate(locale, "admin_recovery.initiator"),
-                status.initiator ?: notAvailable,
-            )
-            AdminRecoveryDetail(
                 contracts.i18n.translate(locale, "admin_recovery.impact.owner_before"),
                 status.impact?.ownerBefore ?: notAvailable,
             )
@@ -724,10 +732,6 @@ private fun AdminRecoveryStatusCard(
                     notAvailable,
                     none,
                 ),
-            )
-            AdminRecoveryDetail(
-                contracts.i18n.translate(locale, "admin_recovery.participants"),
-                adminRecoveryListText(status.participants, notAvailable, none),
             )
             AdminRecoveryDetail(
                 contracts.i18n.translate(locale, "admin_recovery.signatures"),
@@ -789,6 +793,31 @@ private fun AdminRecoveryStatusCard(
                 contracts.i18n.translate(locale, "admin_recovery.denial"),
                 status.denialKey?.let { contracts.i18n.translate(locale, it) } ?: none,
             )
+            TechnicalDetails(
+                contracts = contracts,
+                locale = locale,
+                testTagPrefix = "admin-recovery-status-details",
+            ) {
+                TechValue(
+                    label = contracts.i18n.translate(
+                        locale,
+                        "field.admin_recovery_request_id",
+                    ),
+                    value = status.requestId ?: notAvailable,
+                )
+                TechValue(
+                    label = contracts.i18n.translate(locale, "admin_recovery.network_id"),
+                    value = status.networkId ?: notAvailable,
+                )
+                TechValue(
+                    label = contracts.i18n.translate(locale, "admin_recovery.initiator"),
+                    value = status.initiator ?: notAvailable,
+                )
+                TechValue(
+                    label = contracts.i18n.translate(locale, "admin_recovery.participants"),
+                    value = adminRecoveryListText(status.participants, notAvailable, none),
+                )
+            }
             refreshedAtUnixMs?.let {
                 Text(
                     text = contracts.i18n.translate(

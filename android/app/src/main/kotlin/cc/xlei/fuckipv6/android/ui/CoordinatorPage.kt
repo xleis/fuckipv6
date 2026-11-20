@@ -16,12 +16,23 @@ import androidx.compose.ui.unit.dp
 import cc.xlei.fuckipv6.android.contract.SharedContracts
 import java.util.Locale
 
+/**
+ * Coordinator control-plane card.
+ *
+ * The headline answers three questions a reader actually has: is governance
+ * usable, who is leading, and is a term in flight. Candidate ids, fencing
+ * tokens, quorum counts and wire reason codes are protocol material, so they
+ * live in the collapsed technical block instead of the headline.
+ */
 @Composable
 fun CoordinatorPageContent(
     contracts: SharedContracts,
     locale: Locale,
     data: CoordinatorPageData,
 ) {
+    val notAvailable = contracts.i18n.translate(locale, "common.not_available")
+    val currentLeader = abbreviateId(data.currentLeader)
+
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.padding(20.dp),
@@ -38,8 +49,11 @@ fun CoordinatorPageContent(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
+                text = contracts.i18n.translate(locale, data.stateKey),
+                style = MaterialTheme.typography.titleSmall,
+            )
+            Text(
                 text = listOf(
-                    contracts.i18n.translate(locale, data.stateKey),
                     contracts.i18n.translate(
                         locale,
                         if (data.governanceWritable) {
@@ -48,26 +62,21 @@ fun CoordinatorPageContent(
                             "runtime.control_plane.governance_read_only"
                         },
                     ),
+                    contracts.i18n.translate(
+                        locale,
+                        "runtime.control_plane.votes",
+                    ) + " ${data.receivedVotes}/${data.requiredVotes}",
                 ).joinToString(" · "),
                 style = MaterialTheme.typography.bodyMedium,
-            )
-            Text(
-                text = listOf(
-                    contracts.i18n.translate(locale, "runtime.control_plane.votes"),
-                    "${data.receivedVotes}/${data.requiredVotes}",
-                    contracts.i18n.translate(locale, "runtime.control_plane.participants"),
-                    data.participantCount.toString(),
-                    contracts.i18n.translate(locale, "runtime.coordinator.reason"),
-                    data.reasonCode,
-                ).joinToString(" · "),
-                style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
                 modifier = Modifier.testTag("coordinator-current-leader"),
                 text = "${contracts.i18n.translate(locale, "runtime.coordinator.leader")}: " +
-                    (data.currentLeader
-                        ?: contracts.i18n.translate(locale, "runtime.coordinator.leader.none")),
+                    (currentLeader ?: contracts.i18n.translate(
+                        locale,
+                        "runtime.coordinator.leader.none",
+                    )),
                 style = MaterialTheme.typography.bodyMedium,
             )
             Text(
@@ -76,8 +85,6 @@ fun CoordinatorPageContent(
                     listOf(
                         contracts.i18n.translate(locale, "runtime.coordinator.latest_term"),
                         "${contracts.i18n.translate(locale, "runtime.coordinator.term")} ${term.term}",
-                        "${contracts.i18n.translate(locale, "runtime.coordinator.fencing_token")} ${term.fencingToken}",
-                        "${contracts.i18n.translate(locale, "runtime.coordinator.leader")} ${term.leader}",
                         contracts.i18n.translate(locale, term.phaseKey),
                     ).joinToString(" · ")
                 } ?: contracts.i18n.translate(locale, "runtime.coordinator.latest_term.none"),
@@ -104,14 +111,16 @@ fun CoordinatorPageContent(
                         verticalArrangement = Arrangement.spacedBy(2.dp),
                     ) {
                         Text(
-                            text = candidate.nodeId,
+                            text = abbreviateId(candidate.nodeId) ?: candidate.nodeId,
                             style = MaterialTheme.typography.bodyMedium,
                         )
                         Text(
                             text = listOf(
                                 contracts.i18n.translate(locale, candidate.healthKey),
-                                contracts.i18n.translate(locale, "runtime.coordinator.eligible"),
                                 contracts.i18n.translate(
+                                    locale,
+                                    "runtime.coordinator.eligible",
+                                ) + " " + contracts.i18n.translate(
                                     locale,
                                     if (candidate.eligibleForElection) {
                                         "runtime.coordinator.eligible.yes"
@@ -119,13 +128,59 @@ fun CoordinatorPageContent(
                                         "runtime.coordinator.eligible.no"
                                     },
                                 ),
-                                contracts.i18n.translate(locale, "runtime.coordinator.reason"),
-                                candidate.reasonCode,
                             ).joinToString(" · "),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
+                }
+            }
+
+            TechnicalDetails(
+                contracts = contracts,
+                locale = locale,
+                testTagPrefix = "coordinator-tech-details",
+            ) {
+                TechValue(
+                    label = contracts.i18n.translate(locale, "runtime.coordinator.reason"),
+                    value = data.reasonCode,
+                )
+                TechValue(
+                    label = contracts.i18n.translate(
+                        locale,
+                        "runtime.control_plane.participants",
+                    ),
+                    value = data.participantCount.toString(),
+                )
+                TechValue(
+                    label = contracts.i18n.translate(locale, "runtime.coordinator.leader"),
+                    value = data.currentLeader ?: notAvailable,
+                )
+                data.latestTerm?.let { term ->
+                    TechValue(
+                        label = contracts.i18n.translate(
+                            locale,
+                            "runtime.coordinator.fencing_token",
+                        ),
+                        value = term.fencingToken.toString(),
+                    )
+                    TechValue(
+                        label = contracts.i18n.translate(locale, "runtime.coordinator.latest_term"),
+                        value = listOf(
+                            "${contracts.i18n.translate(locale, "runtime.coordinator.term")} ${term.term}",
+                            contracts.i18n.translate(locale, term.phaseKey),
+                            term.leader,
+                        ).joinToString(" · "),
+                    )
+                }
+                data.candidates.forEach { candidate ->
+                    TechValue(
+                        label = listOfNotNull(
+                            abbreviateId(candidate.nodeId),
+                            contracts.i18n.translate(locale, candidate.healthKey),
+                        ).joinToString(" · "),
+                        value = candidate.reasonCode,
+                    )
                 }
             }
         }

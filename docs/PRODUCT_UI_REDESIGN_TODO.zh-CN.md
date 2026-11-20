@@ -4311,6 +4311,12 @@ Bearer 头、快照全切片解析、401 单次失败不重试、命令 POST 信
 双携带与可续传快照帧、连接被拒返回 `Unreachable`。这补上了此前只有 fake transport 覆盖的传输层。Android 单测共 116 项通过。
 W16-01 仍因外壳文件被并发改动占用而无法挂载，保持 `[ ]`。
 
+**补充（2026-11-21，页面挂载）**：设置页、File 浏览面板与传输摘要已挂到 shell：`settings` 页渲染 `SettingsPageContent`
+（保存写本机偏好后 `recreate()` 重建桥接，清除同步移除），`files` 页在能力卡片下方渲染 `FileBrowseContent` 与
+`FileTransferSummary`，动作分别接到 `FileBrowseController` 与传输控制器；`MainActivity` 在配置有效时创建这两个控制器。
+本次把并行会话对同一批 shell 文件的样式改动一并提交，否则挂载无法落地。Android 单测 119 项通过。成员页、SAF 选择器交互、
+上传/下载按钮与 VpnService 仍未完成，W16-01/W16-02 保持 `[ ]`。
+
 ### W16-02 前台 VpnService 生命周期 `[ ]`
 
 - [ ] 使用前台服务承载 VpnService 和数据面；

@@ -14,6 +14,9 @@ enum class SurfaceStatus(val wireName: String) {
     REFRESHING("refreshing"),
     EMPTY("empty"),
     READY("ready"),
+
+    /** A page the desktop surfaces own and this device deliberately does not. */
+    NOT_AVAILABLE_ON_DEVICE("not_available_on_device"),
 }
 
 data class SurfaceState(
@@ -27,4 +30,19 @@ data class SurfaceState(
 ) {
     val titleKey: String = "state.${status.wireName}.title"
     val detailKey: String = detailKeyOverride ?: "state.${status.wireName}.detail"
+}
+
+/**
+ * Maps a bridge failure detail key to the status that headline should carry.
+ *
+ * A failed fetch used to render under "control service unavailable", which
+ * describes a server-side control plane, not what the reader is looking at.
+ * The detail key already names the real cause, so the title follows it.
+ */
+fun failureStatus(detailKey: String?): SurfaceStatus = when (detailKey) {
+    "state.permission_denied.detail" -> SurfaceStatus.PERMISSION_DENIED
+    "state.offline.detail" -> SurfaceStatus.OFFLINE
+    "state.error.detail" -> SurfaceStatus.ERROR
+    "state.unsupported.detail" -> SurfaceStatus.UNSUPPORTED
+    else -> SurfaceStatus.CONTROL_UNAVAILABLE
 }

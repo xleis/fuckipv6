@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Paper palette mirror for pre-Compose window chrome only. -->
+<resources>
+    <color name="paper_background">#FFF2EDE2</color>
+</resources>

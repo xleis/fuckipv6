@@ -1,8 +1,10 @@
 package cc.xlei.fuckipv6.android
 
 import android.content.Intent
+import android.graphics.Color
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.collectAsState
@@ -27,11 +29,19 @@ import cc.xlei.fuckipv6.android.bridge.NodeBridge
 import cc.xlei.fuckipv6.android.bridge.LiveAction
 import cc.xlei.fuckipv6.android.bridge.NodeCommandBridge
 import cc.xlei.fuckipv6.android.bridge.NodeCommandClient
+import cc.xlei.fuckipv6.android.bridge.FileBrowseClient
+import cc.xlei.fuckipv6.android.bridge.FileTransferClient
 import cc.xlei.fuckipv6.android.bridge.NodeEventStream
 import cc.xlei.fuckipv6.android.bridge.RelaySurface
 import cc.xlei.fuckipv6.android.ui.AdminRecoveryPageData
 import cc.xlei.fuckipv6.android.ui.CoordinatorPageData
+import cc.xlei.fuckipv6.android.ui.FileBrowseActions
+import cc.xlei.fuckipv6.android.ui.FileBrowseController
+import cc.xlei.fuckipv6.android.ui.FileTransferController
 import cc.xlei.fuckipv6.android.ui.RelayPageData
+import cc.xlei.fuckipv6.android.ui.SettingsPageData
+import cc.xlei.fuckipv6.android.ui.SettingsValidation
+import cc.xlei.fuckipv6.android.ui.nodeApiSettingsData
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import cc.xlei.fuckipv6.android.contract.SharedContractLoader
@@ -50,10 +60,17 @@ class MainActivity : ComponentActivity() {
     private val adminPage = MutableStateFlow<AdminRecoveryPageData?>(null)
     private var eventJob: Job? = null
     private var refreshNetwork: String? = null
+    private var browseController: FileBrowseController? = null
+    private var transferController: FileTransferController? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        // The shipped palette is cream paper in both system modes, so the
+        // system bars always need dark glyphs instead of following the OS theme.
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT),
+        )
         val contracts = runCatching { SharedContractLoader.load(assets) }
 
         val apiConfig = loadApiConfig(intent)
@@ -67,6 +84,16 @@ class MainActivity : ComponentActivity() {
         commandBridge = apiConfig
             ?.takeIf { it.isValid }
             ?.let { NodeCommandBridge(NodeCommandClient(it)) }
+        if (apiConfig != null && apiConfig.isValid) {
+            browseController = FileBrowseController(
+                FileBrowseClient(apiConfig),
+                bridgeScope,
+            ).also { controller -> controller.loadTargets() }
+            transferController = FileTransferController(
+                FileTransferClient(apiConfig),
+                bridgeScope,
+            ).also { controller -> controller.refresh() }
+        }
         recoveryBridge = apiConfig
             ?.takeIf { it.isValid }
             ?.let { NodeCommandBridge(NodeCommandClient(it)) }
@@ -176,6 +203,9 @@ class MainActivity : ComponentActivity() {
                 node?.state() ?: MutableStateFlow<BridgeState>(BridgeState.NotConfigured)
             }.collectAsState()
             val ready = bridgeState as? BridgeState.Ready
+            val browse = browseController
+            val browseState = browse?.state()?.collectAsState()?.value
+            val transferState = transferController?.state()?.collectAsState()?.value
             val files = ready?.data
             val filesFailureKey = (bridgeState as? BridgeState.Failed)?.failure?.uiStateKey
             val relay = ready?.relay?.let(::relayPageData)
@@ -252,6 +282,47 @@ class MainActivity : ComponentActivity() {
         )
         bridge.submit(bridgeScope, body)
     }
+
+    private fun settingsData(controller: FileBrowseController?): SettingsPageData {
+        val preferences = getSharedPreferences(PREFERENCES, MODE_PRIVATE)
+        val url = preferences.getString(KEY_API_URL, null)
+        val hasToken = !preferences.getString(KEY_API_TOKEN, null).isNullOrBlank()
+        return nodeApiSettingsData(
+            url = url,
+            hasToken = hasToken,
+            connected = controller != null,
+            onSave = title@{ url, token ->
+                val validation = SettingsValidation.of(url, token)
+                if (!validation.isValid) return@title validation
+                preferences.edit()
+                    .putString(KEY_API_URL, url.trim())
+                    .putString(KEY_API_TOKEN, token.trim().ifEmpty { null })
+                    .apply()
+                bridgeScope.launch { recreate() }
+                validation
+            },
+            onClear = {
+                preferences.edit().remove(KEY_API_URL).remove(KEY_API_TOKEN).apply()
+                bridgeScope.launch { recreate() }
+            },
+        )
+    }
+
+    private fun browseActions(controller: FileBrowseController?): FileBrowseActions? =
+        controller?.let {
+            FileBrowseActions(
+                selectTarget = { target -> it.open(target, "") },
+                openEntry = { entry ->
+                    if (entry.isDirectory) {
+                        val current = it.state().value
+                        it.open(current.selected ?: return@FileBrowseActions, entry.path)
+                    }
+                },
+                up = it::up,
+                loadMore = it::loadMore,
+                refresh = it::loadTargets,
+            )
+        }
 
     private fun nextRequestId(): Long {
         val candidate = requestSequence.incrementAndGet()

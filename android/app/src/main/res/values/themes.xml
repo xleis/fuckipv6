@@ -1,10 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Paper-first window chrome: cream ground, dark system bar icons. The
+     Compose theme carries the same palette; this file only covers the window
+     before the first frame. -->
 <resources>
     <style name="Theme.FuckIpv6" parent="android:style/Theme.Material.Light.NoActionBar">
         <item name="android:windowActionModeOverlay">true</item>
         <item name="android:windowNoTitle">true</item>
+        <item name="android:windowBackground">@color/paper_background</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:colorBackground">@color/paper_background</item>
     </style>
 </resources>

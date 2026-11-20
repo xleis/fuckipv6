@@ -1,8 +1,9 @@
 # W16 Android 页面挂载清单
 
-> 状态：挂载契约与回调就绪（2026-11-21）。本文只记录“把已实现的能力挂到 shell 上”需要做的事，
-> 不重复各模块的验收证据。当前阻塞：`android/.../ui/FuckIpv6App.kt` 与 `MainActivity.kt` 带有其他并行
-> 会话的未提交改动，挂载提交必须等这两个文件回到可提交状态，避免把他人未完成的工作混入。
+> 状态：**设置页、File 浏览面板与传输摘要素材已挂载**（2026-11-21）。`FuckIpv6App`/`MainActivity` 已接受
+> `settings`/`fileBrowse`/`fileBrowseActions`/`transfers`，`MainActivity` 用 `FileBrowseController` 与
+> `FileTransferController` 驱动。挂载时把并行会话的 shell 样式改动（图标、技术详情、主题）一并提交，因为二者改的是
+> 同一批文件；成员页与 SAF 选择器交互仍未挂载。
 
 ## 1. 已就绪的制品
 
@@ -22,14 +23,13 @@
 
 ## 2. 挂载步骤（按顺序，每步可单独提交）
 
-1. **设置页**：`FuckIpv6App(..., settings = surfaces.settings)`，`PageContent` 增加
-   `pageId == "settings" && settings != null -> SettingsPageContent(...)`。
-2. **File 浏览面板**：`FuckIpv6App(..., fileBrowse = surfaces.fileBrowse)`，
-   `pageId == "files"` 时优先渲染 `FileBrowseContent`，其 `files != null` 的能力卡片保留在同一页顶部。
-3. **传输列表**：在 File 面板下方加 `transfers` 区块；上传/下载按钮分别调用
+1. ~~**设置页**~~：已完成 — `pageId == "settings"` 渲染 `SettingsPageContent`，保存/清除写本机偏好后
+   `recreate()` 重建桥接。
+2. ~~**File 浏览面板**~~：已完成 — `pageId == "files"` 在能力卡片下方渲染 `FileBrowseContent`，
+   目标选择/进入目录/上级/加载更多/刷新都接到 `FileBrowseController`。
+3. **传输列表**：摘要已挂载（方向/状态/进度/错误码）；上传/下载按钮仍待接
    `FileTransferController.upload(...)` 与 `DownloadSaver.save(token, SafDownloadSink(...))`，
-   选择器用 `ActivityResultContracts.OpenDocument` / `CreateDocument`，拿到的 `Uri` 交给
-   `platform/SafDocuments`。
+   选择器用 `ActivityResultContracts.OpenDocument` / `CreateDocument`，`Uri` 交给 `platform/SafDocuments`。
 4. **成员页**：新增页面渲染，数据来自 `MemberSurface.listCommand(networkId)` 的 `network_members` 结果；
    未拿到结果前显示“未观察”。
 5. **事件驱动**：`MainActivity` 已启动 `NodeEventStream`，挂载后不要再引入第二套轮询。

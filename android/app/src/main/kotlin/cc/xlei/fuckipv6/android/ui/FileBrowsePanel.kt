@@ -21,6 +21,15 @@ import cc.xlei.fuckipv6.android.bridge.FileTarget
 import cc.xlei.fuckipv6.android.contract.SharedContracts
 import java.util.Locale
 
+/** Callbacks the File browser needs; keeps the shell signature small. */
+data class FileBrowseActions(
+    val selectTarget: (FileTarget) -> Unit,
+    val openEntry: (DirectoryEntry) -> Unit,
+    val up: () -> Unit,
+    val loadMore: () -> Unit,
+    val refresh: () -> Unit,
+)
+
 /**
  * Read-only File browser for the Android surface.
  *
@@ -176,6 +185,62 @@ fun FileBrowseContent(
                         Text(contracts.i18n.translate(locale, "file.page.load_more"))
                     }
                 }
+            }
+        }
+    }
+}
+/**
+ * Transfer list summary. It shows only what the node reported: direction,
+ * state, progress and the node's stable error code. Bytes are never estimated.
+ */
+@Composable
+fun FileTransferSummary(
+    contracts: SharedContracts,
+    locale: Locale,
+    state: FileTransferState,
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("file-transfers"),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(
+                modifier = Modifier.semantics { heading() },
+                text = contracts.i18n.translate(locale, "file.page.download"),
+                style = MaterialTheme.typography.titleMedium,
+            )
+            if (state.transfers.isEmpty()) {
+                Text(
+                    text = contracts.i18n.translate(locale, "common.no_data"),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            state.transfers.forEach { transfer ->
+                Text(
+                    modifier = Modifier.testTag("file-transfer-${transfer.transferId}"),
+                    text = buildString {
+                        append(transfer.direction ?: "transfer")
+                        append(" · ")
+                        append(transfer.state ?: "unknown")
+                        append(" · ")
+                        append("${transfer.transferredBytes}/${transfer.totalBytes} B")
+                        transfer.errorCode?.let { append(" · $it") }
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            state.errorKey?.let { key ->
+                Text(
+                    modifier = Modifier.testTag("file-transfers-error"),
+                    text = contracts.i18n.translate(locale, key),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
             }
         }
     }

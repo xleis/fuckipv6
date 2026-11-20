@@ -228,15 +228,10 @@ private fun RelayHealthBody(
     )
     RelayDetail(
         label = contracts.i18n.translate(locale, "relay.listener"),
-        value = buildString {
-            append(
-                contracts.i18n.translate(
-                    locale,
-                    if (health.listenerBound) "relay.listener.bound" else "relay.listener.unbound",
-                ),
-            )
-            health.listenAddr?.let { append(" · $it") }
-        },
+        value = contracts.i18n.translate(
+            locale,
+            if (health.listenerBound) "relay.listener.bound" else "relay.listener.unbound",
+        ),
         modifier = Modifier.testTag("relay-listener"),
     )
     RelayDetail(
@@ -278,24 +273,32 @@ private fun RelayHealthBody(
             value = formatTimestamp(locale, observedAt),
         )
     }
-    health.reasonCode?.let { reasonCode ->
-        Text(
-            modifier = Modifier.testTag("relay-reason-code"),
-            text = contracts.i18n.translate(
-                locale,
-                "relay.reason_code",
-                mapOf("reason_code" to reasonCode),
-            ),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
     health.issueKeys.forEach { issueKey ->
         Text(
             text = contracts.i18n.translate(locale, issueKey),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.error,
         )
+    }
+    if (health.listenAddr != null || health.reasonCode != null) {
+        TechnicalDetails(
+            contracts = contracts,
+            locale = locale,
+            testTagPrefix = "relay-tech-details",
+        ) {
+            health.listenAddr?.let { address ->
+                TechValue(
+                    label = contracts.i18n.translate(locale, "relay.listener"),
+                    value = address,
+                )
+            }
+            health.reasonCode?.let { reasonCode ->
+                TechValue(
+                    label = contracts.i18n.translate(locale, "relay.reason_code_label"),
+                    value = reasonCode,
+                )
+            }
+        }
     }
 }
 
@@ -347,28 +350,33 @@ private fun RelayGovernanceBody(
                 )
             } else {
                 governance.events.forEach { event ->
-                    Column(
+                    Text(
                         modifier = Modifier
                             .fillMaxWidth()
                             .testTag("relay-governance-event"),
-                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                        text = contracts.i18n.translate(
+                            locale,
+                            "relay.governance.action.${event.action.wireName()}",
+                        ),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+                val eventsWithReason = governance.events.mapNotNull { event ->
+                    event.reason_code?.let { code -> event to code }
+                }
+                if (eventsWithReason.isNotEmpty()) {
+                    TechnicalDetails(
+                        contracts = contracts,
+                        locale = locale,
+                        testTagPrefix = "relay-governance-tech-details",
                     ) {
-                        Text(
-                            text = contracts.i18n.translate(
-                                locale,
-                                "relay.governance.action.${event.action.wireName()}",
-                            ),
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                        event.reason_code?.let {
-                            Text(
-                                text = contracts.i18n.translate(
+                        eventsWithReason.forEach { (event, code) ->
+                            TechValue(
+                                label = contracts.i18n.translate(
                                     locale,
-                                    "relay.governance.event.reason",
-                                    mapOf("reason_code" to it),
+                                    "relay.governance.action.${event.action.wireName()}",
                                 ),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                value = code,
                             )
                         }
                     }

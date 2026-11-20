@@ -4167,12 +4167,12 @@ impl GpuiShell {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded_md()
-                            .bg(rgba(DARK_THEME.colors.accent_soft.rgba_hex()))
+                            .rounded(px(0.0))
+                            .bg(rgba(COLOR_TEXT))
                             .child(lucide_icon(
                                 include_bytes!("../../assets/icons/wifi.svg"),
                                 22.0,
-                                COLOR_ACCENT,
+                                COLOR_BG,
                             )),
                     )
                     .child(
@@ -4295,14 +4295,12 @@ impl GpuiShell {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded(px(13.0))
-                            .border_1()
-                            .border_color(rgba(COLOR_DIVIDER))
-                            .bg(rgba(DARK_THEME.colors.accent_soft.rgba_hex()))
+                            .rounded(px(0.0))
+                            .bg(rgba(COLOR_TEXT))
                             .child(lucide_icon(
                                 include_bytes!("../../assets/icons/wifi.svg"),
                                 23.0,
-                                COLOR_ACCENT,
+                                COLOR_BG,
                             )),
                     ),
             )
@@ -11190,10 +11188,7 @@ impl GpuiShell {
                 };
                 rows.push(
                     div()
-                        .debug_selector({
-                            let index = index;
-                            move || format!("visual-topology-event-{index}")
-                        })
+                        .debug_selector(move || format!("visual-topology-event-{index}"))
                         .flex()
                         .items_start()
                         .justify_between()
@@ -11684,7 +11679,7 @@ impl GpuiShell {
             let border_color = if selected || node.is_self {
                 COLOR_TEXT
             } else if on_path {
-                COLOR_DIVIDER
+                COLOR_TEXT_MUTED
             } else {
                 COLOR_DIVIDER
             };
@@ -11829,9 +11824,6 @@ impl GpuiShell {
                         }),
                 );
 
-            if hovered {
-                card = card;
-            }
             if hovered && !menu_open {
                 card = card.child(
                     div()

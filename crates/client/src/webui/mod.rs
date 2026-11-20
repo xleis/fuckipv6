@@ -337,12 +337,7 @@ async fn handle_local_shell_session(
     // The token is scoped to this backend process and readable only by the
     // invoking user, so every shell restart may present it again; a wrong
     // token is still rejected in constant time.
-    let expected = bootstrap
-        .token
-        .lock()
-        .ok()
-        .map(|slot| slot.clone())
-        .flatten();
+    let expected = bootstrap.token.lock().ok().and_then(|slot| slot.clone());
     let Some(expected) = expected else {
         return owner_api_error(StatusCode::UNAUTHORIZED, "桌面外壳引导令牌不可用");
     };

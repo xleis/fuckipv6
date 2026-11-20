@@ -168,9 +168,7 @@ impl EmbeddedNodeRuntime {
         .await;
         match started {
             Ok(NodeCommandOutcome::Rejected(problem)) | Err(problem) => {
-                if let Err(cleanup) = host.stop().await {
-                    return Err(cleanup);
-                }
+                host.stop().await?;
                 Err(problem)
             }
             Ok(_) => Ok(host),

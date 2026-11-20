@@ -220,11 +220,7 @@ impl PeerHealth {
         }
 
         let (eligible_probes, _, loss_rate) = probes.window_loss(now_micros, response_grace);
-        if eligible_probes > 0 && loss_rate > threshold.max_loss_rate {
-            return false;
-        }
-
-        true
+        !(eligible_probes > 0 && loss_rate > threshold.max_loss_rate)
     }
 
     fn probes(&self) -> MutexGuard<'_, ProbeHealth> {

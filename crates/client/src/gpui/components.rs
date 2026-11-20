@@ -146,7 +146,7 @@ pub fn button(
     } else {
         match variant {
             ButtonVariant::Primary => (colors.accent, colors.background_deep),
-            ButtonVariant::Secondary => (colors.background_deep, colors.text),
+            ButtonVariant::Secondary => (colors.panel_solid, colors.text),
             ButtonVariant::Ghost => (colors.panel_raised.with_alpha(0), colors.text_muted),
             ButtonVariant::Danger => (colors.danger_soft, colors.danger_text),
         }

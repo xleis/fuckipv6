@@ -203,11 +203,11 @@ struct Reply {
 
 fn checksum(data: &[u8]) -> u16 {
     let mut sum = 0u32;
-    let mut chunks = data.chunks_exact(2);
-    for chunk in &mut chunks {
-        sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+    let (chunks, remainder) = data.as_chunks::<2>();
+    for chunk in chunks {
+        sum += u16::from_be_bytes(*chunk) as u32;
     }
-    if let [last] = chunks.remainder() {
+    if let [last] = remainder {
         sum += (*last as u32) << 8;
     }
     while sum >> 16 != 0 {
@@ -397,6 +397,7 @@ async fn wait_for_peer(runtime: &EmbeddedNodeRuntime, timeout: Duration) -> Resu
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_echo(
     session: &Session,
     pending: &Mutex<HashMap<(Family, u16), Instant>>,

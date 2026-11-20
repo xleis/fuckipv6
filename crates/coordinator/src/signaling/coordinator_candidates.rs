@@ -6607,15 +6607,13 @@ mod tests {
         let credential = fixture.credential(&term_one);
 
         let mut previous_term = None;
-        let mut step = 0u64;
         let mut before = authority_fingerprint(
             &store
                 .status(&owner_id, &fixture.network.network_id, NOW + 1)
                 .unwrap(),
         );
-        for action in sequence {
-            let now = NOW + step + 1;
-            step += 1;
+        for (step, action) in sequence.iter().enumerate() {
+            let now = NOW + step as u64 + 1;
             let outcome = match action {
                 InterleavingAction::ProposeTermOneByOne => store
                     .propose_election(&candidate_one_id, proposal.clone(), now)
@@ -6745,15 +6743,13 @@ mod tests {
         let online_members = vec![owner_id.clone(), ordinary_id];
 
         let mut previous_term = None;
-        let mut step = 0u64;
         let mut before = authority_fingerprint(
             &store
                 .status(&owner_id, &fixture.network.network_id, NOW + 1)
                 .unwrap(),
         );
-        for action in sequence {
-            let now = NOW + step + 1;
-            step += 1;
+        for (step, action) in sequence.iter().enumerate() {
+            let now = NOW + step as u64 + 1;
             let outcome = match action {
                 EmergencyAction::IssueEmergencyLeader => store
                     .issue_emergency_leader(

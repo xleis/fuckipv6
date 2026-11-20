@@ -342,6 +342,11 @@ where
 }
 
 /// Byte length of a snapshot or outcome payload, reported through out_len.
+///
+/// # Safety
+/// The caller must pass a pointer produced by this module, or the documented
+/// null sentinel, and every out-parameter must reference writable storage of the
+/// documented size that stays valid for the whole call.
 #[no_mangle]
 pub unsafe extern "C" fn fv6_runtime_create(
     config_json: *const c_char,
@@ -427,6 +432,11 @@ unsafe fn report_error(
     }
 }
 
+///
+/// # Safety
+/// The caller must pass a pointer produced by this module, or the documented
+/// null sentinel, and every out-parameter must reference writable storage of the
+/// documented size that stays valid for the whole call.
 #[no_mangle]
 pub unsafe extern "C" fn fv6_runtime_destroy(runtime: *mut Fv6Runtime) {
     if runtime.is_null() {
@@ -439,6 +449,11 @@ pub unsafe extern "C" fn fv6_runtime_destroy(runtime: *mut Fv6Runtime) {
     }));
 }
 
+///
+/// # Safety
+/// The caller must pass a pointer produced by this module, or the documented
+/// null sentinel, and every out-parameter must reference writable storage of the
+/// documented size that stays valid for the whole call.
 #[no_mangle]
 pub unsafe extern "C" fn fv6_runtime_start(runtime: *mut Fv6Runtime, timeout_ms: u64) -> i32 {
     guard(Fv6Status::Panic, || {
@@ -452,6 +467,11 @@ pub unsafe extern "C" fn fv6_runtime_start(runtime: *mut Fv6Runtime, timeout_ms:
     })
 }
 
+///
+/// # Safety
+/// The caller must pass a pointer produced by this module, or the documented
+/// null sentinel, and every out-parameter must reference writable storage of the
+/// documented size that stays valid for the whole call.
 #[no_mangle]
 pub unsafe extern "C" fn fv6_runtime_stop(runtime: *mut Fv6Runtime, timeout_ms: u64) -> i32 {
     guard(Fv6Status::Panic, || {
@@ -465,6 +485,11 @@ pub unsafe extern "C" fn fv6_runtime_stop(runtime: *mut Fv6Runtime, timeout_ms: 
     })
 }
 
+///
+/// # Safety
+/// The caller must pass a pointer produced by this module, or the documented
+/// null sentinel, and every out-parameter must reference writable storage of the
+/// documented size that stays valid for the whole call.
 #[no_mangle]
 pub unsafe extern "C" fn fv6_runtime_phase(runtime: *const Fv6Runtime) -> i32 {
     match runtime.as_ref() {
@@ -473,6 +498,11 @@ pub unsafe extern "C" fn fv6_runtime_phase(runtime: *const Fv6Runtime) -> i32 {
     }
 }
 
+///
+/// # Safety
+/// The caller must pass a pointer produced by this module, or the documented
+/// null sentinel, and every out-parameter must reference writable storage of the
+/// documented size that stays valid for the whole call.
 #[no_mangle]
 pub unsafe extern "C" fn fv6_runtime_last_error(
     runtime: *const Fv6Runtime,
@@ -489,6 +519,11 @@ pub unsafe extern "C" fn fv6_runtime_last_error(
     })
 }
 
+///
+/// # Safety
+/// The caller must pass a pointer produced by this module, or the documented
+/// null sentinel, and every out-parameter must reference writable storage of the
+/// documented size that stays valid for the whole call.
 #[no_mangle]
 pub unsafe extern "C" fn fv6_runtime_snapshot(
     runtime: *mut Fv6Runtime,
@@ -524,6 +559,11 @@ pub unsafe extern "C" fn fv6_runtime_snapshot(
     })
 }
 
+///
+/// # Safety
+/// The caller must pass a pointer produced by this module, or the documented
+/// null sentinel, and every out-parameter must reference writable storage of the
+/// documented size that stays valid for the whole call.
 #[no_mangle]
 pub unsafe extern "C" fn fv6_runtime_execute(
     runtime: *mut Fv6Runtime,
@@ -578,6 +618,11 @@ pub unsafe extern "C" fn fv6_runtime_execute(
     })
 }
 
+///
+/// # Safety
+/// The caller must pass a pointer produced by this module, or the documented
+/// null sentinel, and every out-parameter must reference writable storage of the
+/// documented size that stays valid for the whole call.
 #[no_mangle]
 pub unsafe extern "C" fn fv6_runtime_network_path_changed(
     runtime: *mut Fv6Runtime,
@@ -606,6 +651,11 @@ pub unsafe extern "C" fn fv6_runtime_network_path_changed(
 }
 
 /// Endpoint handed to the host through the open_network callback.
+///
+/// # Safety
+/// The caller must pass a pointer produced by this module, or the documented
+/// null sentinel, and every out-parameter must reference writable storage of the
+/// documented size that stays valid for the whole call.
 #[no_mangle]
 pub unsafe extern "C" fn fv6_endpoint_mtu(
     endpoint: *const EndpointHandle,
@@ -623,6 +673,11 @@ pub unsafe extern "C" fn fv6_endpoint_mtu(
     })
 }
 
+///
+/// # Safety
+/// The caller must pass a pointer produced by this module, or the documented
+/// null sentinel, and every out-parameter must reference writable storage of the
+/// documented size that stays valid for the whole call.
 #[no_mangle]
 pub unsafe extern "C" fn fv6_endpoint_send(
     endpoint: *mut EndpointHandle,
@@ -650,6 +705,11 @@ pub unsafe extern "C" fn fv6_endpoint_send(
     })
 }
 
+///
+/// # Safety
+/// The caller must pass a pointer produced by this module, or the documented
+/// null sentinel, and every out-parameter must reference writable storage of the
+/// documented size that stays valid for the whole call.
 #[no_mangle]
 pub unsafe extern "C" fn fv6_endpoint_recv(
     endpoint: *mut EndpointHandle,
@@ -681,6 +741,11 @@ pub unsafe extern "C" fn fv6_endpoint_recv(
     })
 }
 
+///
+/// # Safety
+/// The caller must pass a pointer produced by this module, or the documented
+/// null sentinel, and every out-parameter must reference writable storage of the
+/// documented size that stays valid for the whole call.
 #[no_mangle]
 pub unsafe extern "C" fn fv6_endpoint_release(endpoint: *mut EndpointHandle) {
     if endpoint.is_null() {
@@ -694,6 +759,11 @@ pub unsafe extern "C" fn fv6_endpoint_release(endpoint: *mut EndpointHandle) {
 }
 
 /// Creates the network configuration and node identity under storage_root.
+///
+/// # Safety
+/// The caller must pass a pointer produced by this module, or the documented
+/// null sentinel, and every out-parameter must reference writable storage of the
+/// documented size that stays valid for the whole call.
 #[no_mangle]
 pub unsafe extern "C" fn fv6_prepare_network(
     storage_root: *const c_char,
@@ -748,6 +818,11 @@ pub unsafe extern "C" fn fv6_prepare_network(
 }
 
 /// Convenience: outcome kind for hosts that only need the variant name.
+///
+/// # Safety
+/// The caller must pass a pointer produced by this module, or the documented
+/// null sentinel, and every out-parameter must reference writable storage of the
+/// documented size that stays valid for the whole call.
 #[no_mangle]
 pub unsafe extern "C" fn fv6_outcome_kind(
     buffer: *const u8,

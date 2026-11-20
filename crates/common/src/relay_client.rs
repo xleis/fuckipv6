@@ -457,27 +457,6 @@ fn spawn_incoming_task(
     })
 }
 
-#[cfg(test)]
-mod incoming_task_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn relay_incoming_task_stop_joins_and_releases_owned_resources() {
-        let resource = Arc::new(());
-        let weak = Arc::downgrade(&resource);
-        let task = tokio::spawn(async move {
-            let _resource = resource;
-            std::future::pending::<()>().await;
-        });
-        let owner = Arc::new(IncomingTask(Mutex::new(Some(task))));
-        let clone = owner.clone();
-        owner.stop().await;
-        clone.stop().await;
-        assert!(weak.upgrade().is_none());
-        assert!(owner.0.lock().await.is_none());
-    }
-}
-
 fn now_secs() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -528,4 +507,25 @@ fn now_unix_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod incoming_task_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn relay_incoming_task_stop_joins_and_releases_owned_resources() {
+        let resource = Arc::new(());
+        let weak = Arc::downgrade(&resource);
+        let task = tokio::spawn(async move {
+            let _resource = resource;
+            std::future::pending::<()>().await;
+        });
+        let owner = Arc::new(IncomingTask(Mutex::new(Some(task))));
+        let clone = owner.clone();
+        owner.stop().await;
+        clone.stop().await;
+        assert!(weak.upgrade().is_none());
+        assert!(owner.0.lock().await.is_none());
+    }
 }

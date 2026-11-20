@@ -785,9 +785,10 @@ fn ip_packet(source: IpAddr, destination: IpAddr) -> Vec<u8> {
             packet[12..16].copy_from_slice(&source.octets());
             packet[16..20].copy_from_slice(&destination.octets());
             packet[20..].copy_from_slice(b"P2v4");
-            let mut sum: u32 = packet[..20]
-                .chunks_exact(2)
-                .map(|word| u32::from(u16::from_be_bytes([word[0], word[1]])))
+            let (words, _) = packet[..20].as_chunks::<2>();
+            let mut sum: u32 = words
+                .iter()
+                .map(|word| u32::from(u16::from_be_bytes(*word)))
                 .sum();
             while sum > 0xffff {
                 sum = (sum & 0xffff) + (sum >> 16);

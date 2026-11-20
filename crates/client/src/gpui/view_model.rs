@@ -8976,7 +8976,7 @@ fn ui_mode_key(mode: UiMode) -> &'static str {
     match mode {
         UiMode::Gpui => "choice.ui_mode.gpui",
         UiMode::WebUi => "choice.ui_mode.web_ui",
-        UiMode::WebViewShell => "choice.ui_mode.webview_shell",
+        UiMode::WebViewShell => "choice.ui_mode.web_view_shell",
         UiMode::Headless => "choice.ui_mode.headless",
     }
 }

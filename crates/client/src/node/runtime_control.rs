@@ -2255,6 +2255,9 @@ enum CoordinatorCandidateRuntimeCommand {
     },
 }
 
+// Internal IPC envelopes: cloned once per command and dropped at the end of the
+// call, so an extra allocation per command would cost more than the stack slot.
+#[allow(clippy::large_enum_variant)]
 enum AdminRecoveryRuntimeCommand {
     Submit(NodeSubmitAdminRecoveryCommand),
     Status(NodeAdminRecoveryStatusCommand),
@@ -2263,6 +2266,7 @@ enum AdminRecoveryRuntimeCommand {
     Execute(NodeExecuteAdminRecoveryCommand),
 }
 
+#[allow(clippy::large_enum_variant)]
 enum AdminRecoveryExecutionResult {
     Status(AdminRecoveryStatusView),
     List(Vec<AdminRecoveryStatusView>),
@@ -2448,7 +2452,9 @@ pub(crate) struct NetworkRuntimeManager {
 }
 
 impl NetworkRuntimeManager {
-    #[allow(clippy::too_many_arguments)]
+    // Kept as the documented failover-audit entry point for W13/W14 data plane
+    // drills; no production caller spawns it yet.
+    #[allow(dead_code, clippy::too_many_arguments)]
     pub(crate) fn spawn_with_failover_audit(
         configs: ConfigManager,
         options: RuntimeOptions,

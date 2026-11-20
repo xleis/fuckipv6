@@ -60,7 +60,7 @@ impl TunnelSettings {
             ));
         }
         let mtu = request.config.tun.mtu;
-        if mtu < MIN_MTU || mtu > MAX_MTU {
+        if !(MIN_MTU..=MAX_MTU).contains(&mtu) {
             return Err(problem(
                 NodeProblemCode::InvalidRequest,
                 format!("iOS tunnel MTU {mtu} is outside {MIN_MTU}..={MAX_MTU}"),

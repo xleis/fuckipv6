@@ -713,14 +713,7 @@ pub async fn recovery_execute(
     print_recovery_status(&current, json)?;
     let denial_key = if current.request_id != request_id {
         Some("admin_recovery.error.request_mismatch")
-    } else if current.state != AdminRecoveryState::Pending {
-        Some(
-            current
-                .denial_key
-                .as_deref()
-                .unwrap_or("admin_recovery.error.not_executable"),
-        )
-    } else if !current.can_execute {
+    } else if current.state != AdminRecoveryState::Pending || !current.can_execute {
         Some(
             current
                 .denial_key
@@ -943,7 +936,7 @@ fn load_recovery_network(manager: &ConfigManager, network_name: &str) -> Result<
 fn parse_node_ids(values: Vec<String>) -> Result<Vec<NodeId>> {
     let mut ids = values
         .into_iter()
-        .map(|value| NodeId::parse(value))
+        .map(NodeId::parse)
         .collect::<std::result::Result<Vec<_>, _>>()?;
     ids.sort();
     ids.dedup();

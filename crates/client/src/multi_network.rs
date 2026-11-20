@@ -197,7 +197,7 @@ impl MultiNetworkSupervisor {
         self.runtimes
             .network_path_changed()
             .await
-            .map_err(|error| crate::embedded::storage_problem(error))
+            .map_err(crate::embedded::storage_problem)
     }
 
     pub(crate) async fn join_embedded_tasks(&self) -> Result<()> {

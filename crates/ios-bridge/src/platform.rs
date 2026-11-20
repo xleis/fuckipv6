@@ -44,19 +44,10 @@ pub type OpenNetworkCallback = unsafe extern "C" fn(
 pub type CloseNetworkCallback = unsafe extern "C" fn(context: *mut c_void) -> i32;
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct HostCallbacks {
     pub open_network: Option<OpenNetworkCallback>,
     pub close_network: Option<CloseNetworkCallback>,
-}
-
-impl Default for HostCallbacks {
-    fn default() -> Self {
-        Self {
-            open_network: None,
-            close_network: None,
-        }
-    }
 }
 
 /// Shared host bridge. The context pointer is owned by the host and must stay

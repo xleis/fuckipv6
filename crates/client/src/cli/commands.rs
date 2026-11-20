@@ -277,6 +277,7 @@ impl RuntimeTunIo {
         self.buffer_tx.clone()
     }
 
+    #[cfg(test)]
     fn tun_mut(&mut self) -> Option<&mut (dyn PacketDevice + 'static)> {
         self.tun.as_deref_mut()
     }
@@ -367,6 +368,7 @@ impl RuntimeTunIo {
     /// The host restores its VPN session and supplies a new device. Old queued
     /// packets are discarded, so they cannot cross a session boundary. Cancelling
     /// replacement may leave I/O stopped; retry replacement before resuming.
+    #[cfg(test)]
     pub(crate) async fn replace_device(&mut self, device: Box<dyn PacketDevice>) -> Result<()> {
         anyhow::ensure!(
             self.descriptor.is_none(),

@@ -2878,7 +2878,6 @@ dependencies = [
  "anyhow",
  "axum",
  "bytes",
- "clap",
  "fs2",
  "fuckipv6-common",
  "futures",

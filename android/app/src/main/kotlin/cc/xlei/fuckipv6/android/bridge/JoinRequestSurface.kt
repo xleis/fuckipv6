@@ -33,6 +33,12 @@ data class JoinReviewOutcomeView(
     val revision: Long?,
 )
 
+/** Result of a batch review: one outcome per request, in the node's order. */
+data class JoinBatchReviewView(
+    val networkId: String?,
+    val outcomes: List<JoinReviewOutcomeView>,
+)
+
 object JoinRequestSurface {
     val ACTIONS = setOf("approve", "reject", "request_information")
 
@@ -70,6 +76,53 @@ object JoinRequestSurface {
         return (0 until array.length()).mapNotNull { index ->
             array.optJSONObject(index)?.let(::request)
         }
+    }
+
+    /**
+     * Encodes a batch review. An empty batch, a duplicate request id inside the
+     * batch, an unknown action or a negative revision is refused locally: the
+     * Coordinator would reject the whole batch and the operator would lose the
+     * rest of the decisions.
+     */
+    fun batchReviewCommand(networkId: String, reviews: List<JoinReviewRequest>): JSONObject? {
+        if (networkId.isBlank() || reviews.isEmpty()) return null
+        if (reviews.map { it.requestId }.toSet().size != reviews.size) return null
+        val encoded = JSONArray()
+        for (review in reviews) {
+            if (review.action !in ACTIONS) return null
+            if (review.requestId.isBlank() || review.expectedRevision < 0) return null
+            val item = JSONObject()
+                .put("request_id", review.requestId)
+                .put("expected_revision", review.expectedRevision)
+                .put("action", review.action)
+            review.note?.takeIf { it.isNotBlank() }?.let { item.put("note", it) }
+            encoded.put(item)
+        }
+        return JSONObject()
+            .put("command", "batch_review_join_requests")
+            .put(
+                "payload",
+                JSONObject()
+                    .put("network_id", networkId)
+                    .put("reviews", encoded),
+            )
+    }
+
+    fun parseBatchReview(data: JSONObject?): JoinBatchReviewView? {
+        if (data == null) return null
+        val array = data.optJSONArray("reviews") ?: return null
+        val outcomes = (0 until array.length()).mapNotNull { index ->
+            val item = array.optJSONObject(index) ?: return@mapNotNull null
+            JoinReviewOutcomeView(
+                requestId = item.stringOrNull("request_id"),
+                state = item.stringOrNull("state"),
+                revision = item.longOrNull("revision"),
+            )
+        }
+        return JoinBatchReviewView(
+            networkId = data.stringOrNull("network_id"),
+            outcomes = outcomes,
+        )
     }
 
     fun parseReview(data: JSONObject?): JoinReviewOutcomeView? {

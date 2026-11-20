@@ -70,6 +70,7 @@ fun FuckIpv6App(
     onMemberLifecycleAction: ((String, cc.xlei.fuckipv6.android.bridge.MemberView) -> Unit)? = null,
     joinRequests: List<cc.xlei.fuckipv6.android.bridge.JoinRequestView>? = null,
     onJoinReview: ((String, cc.xlei.fuckipv6.android.bridge.JoinRequestView) -> Unit)? = null,
+    onBatchApprove: ((List<cc.xlei.fuckipv6.android.bridge.JoinRequestView>) -> Unit)? = null,
     invitations: List<cc.xlei.fuckipv6.android.bridge.InvitationView>? = null,
     issuedInvitationCode: String? = null,
     onCreateInvitation: (() -> Unit)? = null,
@@ -175,6 +176,7 @@ fun FuckIpv6App(
                 onMemberLifecycleAction = onMemberLifecycleAction,
                 joinRequests = joinRequests,
                 onJoinReview = onJoinReview,
+                onBatchApprove = onBatchApprove,
                 invitations = invitations,
                 issuedInvitationCode = issuedInvitationCode,
                 onCreateInvitation = onCreateInvitation,
@@ -233,6 +235,7 @@ fun PageContent(
     onMemberLifecycleAction: ((String, cc.xlei.fuckipv6.android.bridge.MemberView) -> Unit)? = null,
     joinRequests: List<cc.xlei.fuckipv6.android.bridge.JoinRequestView>? = null,
     onJoinReview: ((String, cc.xlei.fuckipv6.android.bridge.JoinRequestView) -> Unit)? = null,
+    onBatchApprove: ((List<cc.xlei.fuckipv6.android.bridge.JoinRequestView>) -> Unit)? = null,
     invitations: List<cc.xlei.fuckipv6.android.bridge.InvitationView>? = null,
     issuedInvitationCode: String? = null,
     onCreateInvitation: (() -> Unit)? = null,
@@ -289,6 +292,7 @@ fun PageContent(
                             locale = locale,
                             requests = joinRequests,
                             onReview = onJoinReview,
+                            onBatchApprove = onBatchApprove,
                         )
                         InvitationListContent(
                             contracts = contracts,

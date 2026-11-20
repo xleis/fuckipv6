@@ -341,6 +341,7 @@ class MainActivity : ComponentActivity() {
                             onMemberLifecycleAction = ::changeMemberLifecycle,
                             joinRequests = joinRequestsState,
                             onJoinReview = ::reviewJoinRequest,
+                            onBatchApprove = ::batchApproveJoinRequests,
                             invitations = invitationsState,
                             issuedInvitationCode = issuedCodeState,
                             onCreateInvitation = ::createInvitation,
@@ -497,6 +498,33 @@ class MainActivity : ComponentActivity() {
         )
         // Keep the compiler honest about the unused config in this path.
         check(config.isValid)
+    }
+
+    /**
+     * Approves several pending applications in one revision-checked batch. Any
+     * request whose revision is missing is dropped before submission; a partial
+     * batch would otherwise be refused wholesale by the Coordinator.
+     */
+    private fun batchApproveJoinRequests(requests: List<JoinRequestView>) {
+        val bridge = memberBridge ?: return
+        val networkId = memberNetworkId ?: return
+        val reviews = requests.mapNotNull { request ->
+            val revision = request.revision ?: return@mapNotNull null
+            JoinReviewRequest(
+                networkId = networkId,
+                requestId = request.requestId,
+                action = "approve",
+                expectedRevision = revision,
+            )
+        }
+        if (reviews.isEmpty()) return
+        val command = JoinRequestSurface.batchReviewCommand(networkId, reviews) ?: return
+        val body = CommandJson.envelope(
+            command = command,
+            requestId = nextRequestId(),
+            idempotencyKey = "join-batch-${networkId}-${UUID.randomUUID()}",
+        )
+        bridge.submit(bridgeScope, body)
     }
 
     private fun refreshInvitations(networkId: String) {

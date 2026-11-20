@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -40,8 +41,11 @@ fun JoinRequestListContent(
     locale: Locale,
     requests: List<JoinRequestView>?,
     onReview: ((String, JoinRequestView) -> Unit)?,
+    onBatchApprove: ((List<JoinRequestView>) -> Unit)? = null,
 ) {
     var pendingReview by remember { mutableStateOf<Pair<String, JoinRequestView>?>(null) }
+    var selectedIds by remember(requests) { mutableStateOf(setOf<String>()) }
+    var confirmBatch by remember { mutableStateOf(false) }
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -82,6 +86,19 @@ fun JoinRequestListContent(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
+                        if (onBatchApprove != null && request.isPending) {
+                            Checkbox(
+                                modifier = Modifier.testTag("join-select-${request.requestId}"),
+                                checked = request.requestId in selectedIds,
+                                onCheckedChange = { checked ->
+                                    selectedIds = if (checked) {
+                                        selectedIds + request.requestId
+                                    } else {
+                                        selectedIds - request.requestId
+                                    }
+                                },
+                            )
+                        }
                         Text(
                             text = request.applicantDisplayName
                                 ?: request.applicantNodeId
@@ -117,7 +134,59 @@ fun JoinRequestListContent(
                     }
                 }
             }
+            if (onBatchApprove != null && !requests.isNullOrEmpty()) {
+                val selected = requests.filter { it.requestId in selectedIds && it.isPending }
+                TextButton(
+                    modifier = Modifier.testTag("join-batch-approve"),
+                    enabled = selected.isNotEmpty(),
+                    onClick = { confirmBatch = true },
+                ) {
+                    Text(
+                        contracts.i18n.translate(locale, "choice.member_lifecycle.approve") +
+                            " (${selected.size})",
+                    )
+                }
+            }
         }
+    }
+
+    if (confirmBatch) {
+        val selected = requests.orEmpty().filter {
+            it.requestId in selectedIds && it.isPending
+        }
+        AlertDialog(
+            onDismissRequest = { confirmBatch = false },
+            title = {
+                Text(contracts.i18n.translate(locale, "confirm.change_member_lifecycle.title"))
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("${selected.size}")
+                    Text(
+                        contracts.i18n.translate(locale, "confirm.change_member_lifecycle.consequence"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    modifier = Modifier.testTag("join-batch-confirm"),
+                    onClick = {
+                        confirmBatch = false
+                        selectedIds = emptySet()
+                        onBatchApprove?.invoke(selected)
+                    },
+                ) {
+                    Text(contracts.i18n.translate(locale, "common.confirm_action".replace("{action}", "")))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmBatch = false }) {
+                    Text(contracts.i18n.translate(locale, "common.cancel"))
+                }
+            },
+        )
     }
 
     pendingReview?.let { (action, request) ->

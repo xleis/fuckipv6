@@ -73,4 +73,62 @@ class JoinRequestSurfaceTest {
         assertTrue(JoinRequestSurface.parseList(JSONObject("{}")).isEmpty())
         assertNull(JoinRequestSurface.parseReview(null))
     }
+
+    @Test
+    fun batchCommandRefusesEmptyDuplicateAndInvalidBatches() {
+        val reviews = listOf(
+            JoinReviewRequest("net-1", "req-1", "approve", 1),
+            JoinReviewRequest("net-1", "req-2", "reject", 2, note = "理由"),
+        )
+        val command = JoinRequestSurface.batchReviewCommand("net-1", reviews)!!
+        assertEquals("batch_review_join_requests", command.getString("command"))
+        val payload = command.getJSONObject("payload")
+        assertEquals("net-1", payload.getString("network_id"))
+        val encoded = payload.getJSONArray("reviews")
+        assertEquals(2, encoded.length())
+        assertEquals("req-1", encoded.getJSONObject(0).getString("request_id"))
+        assertEquals(1L, encoded.getJSONObject(0).getLong("expected_revision"))
+        assertEquals("approve", encoded.getJSONObject(0).getString("action"))
+        assertEquals("理由", encoded.getJSONObject(1).getString("note"))
+
+        assertNull(JoinRequestSurface.batchReviewCommand("net-1", emptyList()))
+        assertNull(JoinRequestSurface.batchReviewCommand(" ", reviews))
+        assertNull(
+            JoinRequestSurface.batchReviewCommand(
+                "net-1",
+                listOf(reviews[0], reviews[0].copy(action = "reject")),
+            ),
+        )
+        assertNull(
+            JoinRequestSurface.batchReviewCommand(
+                "net-1",
+                listOf(reviews[0].copy(action = "ban")),
+            ),
+        )
+        assertNull(
+            JoinRequestSurface.batchReviewCommand(
+                "net-1",
+                listOf(reviews[0].copy(expectedRevision = -1)),
+            ),
+        )
+    }
+
+    @Test
+    fun batchOutcomeKeepsEveryDecisionWithItsState() {
+        val result = JoinRequestSurface.parseBatchReview(
+            JSONObject(
+                """{"network_id":"net-1","reviews":[
+                     {"request_id":"req-1","state":"approved","revision":2},
+                     {"request_id":"req-2","state":"rejected","revision":3},
+                     "not-an-object"]}""".trimIndent(),
+            ),
+        )!!
+        assertEquals("net-1", result.networkId)
+        assertEquals(2, result.outcomes.size)
+        assertEquals("approved", result.outcomes[0].state)
+        assertEquals(3L, result.outcomes[1].revision)
+
+        assertNull(JoinRequestSurface.parseBatchReview(null))
+        assertNull(JoinRequestSurface.parseBatchReview(JSONObject("{}")))
+    }
 }

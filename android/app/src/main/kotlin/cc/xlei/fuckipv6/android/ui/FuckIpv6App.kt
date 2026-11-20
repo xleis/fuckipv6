@@ -72,6 +72,8 @@ fun FuckIpv6App(
     identity: cc.xlei.fuckipv6.android.bridge.IdentityView? = null,
     networks: List<cc.xlei.fuckipv6.android.bridge.NetworkView>? = null,
     routing: List<cc.xlei.fuckipv6.android.bridge.RoutingSummaryView>? = null,
+    localExit: cc.xlei.fuckipv6.android.bridge.LocalExitView? = null,
+    exitSelections: List<cc.xlei.fuckipv6.android.bridge.ExitSelectionView>? = null,
     members: cc.xlei.fuckipv6.android.bridge.MemberDirectoryView? = null,
     onRefreshMembers: (() -> Unit)? = null,
     onMemberLifecycleAction: ((String, cc.xlei.fuckipv6.android.bridge.MemberView) -> Unit)? = null,
@@ -185,6 +187,8 @@ fun FuckIpv6App(
                 identity = identity,
                 networks = networks,
                 routing = routing,
+                localExit = localExit,
+                exitSelections = exitSelections,
                 members = members,
                 onRefreshMembers = onRefreshMembers,
                 onMemberLifecycleAction = onMemberLifecycleAction,
@@ -251,6 +255,8 @@ fun PageContent(
     identity: cc.xlei.fuckipv6.android.bridge.IdentityView? = null,
     networks: List<cc.xlei.fuckipv6.android.bridge.NetworkView>? = null,
     routing: List<cc.xlei.fuckipv6.android.bridge.RoutingSummaryView>? = null,
+    localExit: cc.xlei.fuckipv6.android.bridge.LocalExitView? = null,
+    exitSelections: List<cc.xlei.fuckipv6.android.bridge.ExitSelectionView>? = null,
     members: cc.xlei.fuckipv6.android.bridge.MemberDirectoryView? = null,
     onRefreshMembers: (() -> Unit)? = null,
     onMemberLifecycleAction: ((String, cc.xlei.fuckipv6.android.bridge.MemberView) -> Unit)? = null,
@@ -359,6 +365,13 @@ fun PageContent(
                     ),
                     locale = locale,
                     contracts = contracts,
+                )
+            pageId == "exit_node" && (localExit != null || exitSelections != null) ->
+                ExitContent(
+                    contracts = contracts,
+                    locale = locale,
+                    local = localExit,
+                    selections = exitSelections,
                 )
             pageId == "routing" && routing != null ->
                 RoutingContent(contracts = contracts, locale = locale, summaries = routing)

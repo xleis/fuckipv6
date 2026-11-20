@@ -1317,6 +1317,8 @@
       "settings.row.write_mode": "设置写入",
       "settings.value.read_only": "只读",
       "settings.value.not_exposed": "当前快照未提供",
+      "settings.row.not_provided": "快照未提供的字段",
+      "settings.not_provided.count": "{count} 项",
       "settings.value.not_configured": "本版本尚未接入",
       "settings.ui_mode_detail": "{effective} · {display}",
       "settings.webui_configuration.detail": "监听地址、证书和来源策略由启动配置控制；当前快照未暴露编辑能力，此项只读。",
@@ -1916,6 +1918,7 @@
       "overview.activity_title": "最近活动",
       "overview.activity.empty": "暂无重要活动",
       "overview.activity.detail": "{outcome} · {resource}",
+      "overview.activity.detail_time": "{outcome} · {time}",
       "overview.activity.audit_id": "审计编号 {audit}",
       "overview.shortcuts": "快捷入口",
       "traffic.session.title": "流量保护",
@@ -3366,7 +3369,8 @@
       "invitation.action.create": "创建邀请",
       "invitation.action.revoke": "撤销",
       "invitation.code.title": "新邀请码（仅显示一次）",
-      "invitation.error.unobserved": "尚未读取邀请列表。"
+      "invitation.error.unobserved": "尚未读取邀请列表。",
+      "peers.unobserved.detail": "尚未从节点快照读取到该网络的节点列表。"
     },
     "en": {
       "nav.overview": "Overview",
@@ -4683,6 +4687,8 @@
       "settings.row.write_mode": "Settings writes",
       "settings.value.read_only": "Read-only",
       "settings.value.not_exposed": "Not exposed by this snapshot",
+      "settings.row.not_provided": "Fields the snapshot does not provide",
+      "settings.not_provided.count": "{count} fields",
       "settings.value.not_configured": "Not connected in this build",
       "settings.ui_mode_detail": "{effective} · {display}",
       "settings.webui_configuration.detail": "The listener, certificate, and origin policy come from startup configuration. This snapshot cannot edit them, so this item is read-only.",
@@ -5282,6 +5288,7 @@
       "overview.activity_title": "Recent activity",
       "overview.activity.empty": "No important activity yet",
       "overview.activity.detail": "{outcome} · {resource}",
+      "overview.activity.detail_time": "{outcome} · {time}",
       "overview.activity.audit_id": "Audit ID {audit}",
       "overview.shortcuts": "Quick actions",
       "traffic.session.title": "Traffic protection",
@@ -6732,7 +6739,8 @@
       "invitation.action.create": "Create invitation",
       "invitation.action.revoke": "Revoke",
       "invitation.code.title": "New invitation code (shown once)",
-      "invitation.error.unobserved": "The invitation list has not been read yet."
+      "invitation.error.unobserved": "The invitation list has not been read yet.",
+      "peers.unobserved.detail": "The node snapshot has not reported peers for this network yet."
     }
   }
 }

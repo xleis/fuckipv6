@@ -43,6 +43,12 @@ data class SnapshotFileView(
  */
 object SnapshotJsonParser {
     /** Parses the File slice only; kept for callers that need nothing else. */
+    fun parsePeers(body: String, networkName: String): Result<PeersSnapshot?> = runCatching {
+        val snapshot = JSONObject(body).optJSONObject("snapshot")
+            ?: throw JSONException("snapshot envelope is missing the snapshot object")
+        PeersSurface.parse(snapshot, networkName)
+    }
+
     fun parse(body: String): Result<SnapshotFileView> =
         parseSnapshot(body).map { it.file }
 
@@ -69,6 +75,7 @@ object SnapshotJsonParser {
             ),
             relay = relaySurface(snapshot),
             coordinator = coordinatorSurface(snapshot),
+            peers = snapshot,
         )
     }
 

@@ -26,6 +26,8 @@ sealed interface BridgeState {
         val relay: RelaySurface? = null,
         val coordinator: CoordinatorSurface? = null,
         val networks: List<NetworkLabel> = emptyList(),
+        /** Raw snapshot object, kept so per-network slices (peers) stay derivable. */
+        val peers: org.json.JSONObject? = null,
     ) : BridgeState
     data class Failed(val failure: BridgeFailure) : BridgeState
 
@@ -71,6 +73,7 @@ class NodeBridge(
                 relay = result.view.relay,
                 coordinator = result.view.coordinator,
                 networks = result.view.file.networks,
+                peers = result.view.peers,
             )
             is SnapshotResult.Failed -> BridgeState.Failed(result.failure)
         }

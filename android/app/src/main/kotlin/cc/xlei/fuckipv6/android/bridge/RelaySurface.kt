@@ -25,4 +25,6 @@ data class ParsedSnapshot(
     val file: SnapshotFileView,
     val relay: RelaySurface?,
     val coordinator: CoordinatorSurface? = null,
+    /** Raw snapshot object; peer views are derived per selected network. */
+    val peers: org.json.JSONObject? = null,
 )

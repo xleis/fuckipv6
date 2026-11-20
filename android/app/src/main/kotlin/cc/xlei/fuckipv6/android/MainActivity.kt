@@ -44,6 +44,7 @@ import cc.xlei.fuckipv6.android.bridge.MemberLifecycleRequest
 import cc.xlei.fuckipv6.android.bridge.MemberLifecycleSurface
 import cc.xlei.fuckipv6.android.bridge.MemberSurface
 import cc.xlei.fuckipv6.android.bridge.NetworkLabel
+import cc.xlei.fuckipv6.android.bridge.PeersSurface
 import cc.xlei.fuckipv6.android.bridge.MemberView
 import cc.xlei.fuckipv6.android.bridge.DirectoryEntry
 import cc.xlei.fuckipv6.android.bridge.FileTransferClient
@@ -333,6 +334,8 @@ class MainActivity : ComponentActivity() {
                             relay = relay,
                             coordinator = coordinator,
                             adminRecovery = admin,
+                            peers = ready?.peers
+                                ?.let { snapshot -> PeersSurface.parse(snapshot, selectedNetworkName.orEmpty()) },
                             availableNetworks = availableNetworks,
                             selectedNetworkName = selectedNetworkName,
                             onSelectNetwork = { name -> selectedNetwork.value = name },

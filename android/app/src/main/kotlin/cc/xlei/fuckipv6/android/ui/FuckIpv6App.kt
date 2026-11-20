@@ -65,6 +65,7 @@ fun FuckIpv6App(
     availableNetworks: List<cc.xlei.fuckipv6.android.bridge.NetworkLabel> = emptyList(),
     selectedNetworkName: String? = null,
     onSelectNetwork: ((String) -> Unit)? = null,
+    peers: cc.xlei.fuckipv6.android.bridge.PeersSnapshot? = null,
     members: cc.xlei.fuckipv6.android.bridge.MemberDirectoryView? = null,
     onRefreshMembers: (() -> Unit)? = null,
     onMemberLifecycleAction: ((String, cc.xlei.fuckipv6.android.bridge.MemberView) -> Unit)? = null,
@@ -171,6 +172,7 @@ fun FuckIpv6App(
                 availableNetworks = availableNetworks,
                 selectedNetworkName = selectedNetworkName,
                 onSelectNetwork = onSelectNetwork,
+                peers = peers,
                 members = members,
                 onRefreshMembers = onRefreshMembers,
                 onMemberLifecycleAction = onMemberLifecycleAction,
@@ -230,6 +232,7 @@ fun PageContent(
     availableNetworks: List<cc.xlei.fuckipv6.android.bridge.NetworkLabel> = emptyList(),
     selectedNetworkName: String? = null,
     onSelectNetwork: ((String) -> Unit)? = null,
+    peers: cc.xlei.fuckipv6.android.bridge.PeersSnapshot? = null,
     members: cc.xlei.fuckipv6.android.bridge.MemberDirectoryView? = null,
     onRefreshMembers: (() -> Unit)? = null,
     onMemberLifecycleAction: ((String, cc.xlei.fuckipv6.android.bridge.MemberView) -> Unit)? = null,
@@ -339,6 +342,8 @@ fun PageContent(
                     locale = locale,
                     contracts = contracts,
                 )
+            pageId == "peers" && peers != null ->
+                PeersContent(contracts = contracts, locale = locale, peers = peers)
             pageId == "relay" && relay != null && relay.backendAvailable ->
                 RelayPageContent(contracts = contracts, locale = locale, data = relay)
             else -> SurfaceNotice(state = state, locale = locale, contracts = contracts)

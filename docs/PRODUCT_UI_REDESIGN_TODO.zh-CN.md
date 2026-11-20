@@ -4241,6 +4241,12 @@ W16-01 仍缺成员/策略页面切片，保持 `[ ]`。
 `SettingsProjectionTest` 4 项，Android 单测共 66 项通过，`:app:lintDebug`、`:app:assembleDebug` 通过。该页面的导航挂载需要与
 并发进行中的外壳改动合并，本次未改动 `FuckIpv6App`，因此 W16-01 保持 `[ ]`。
 
+**补充（2026-11-21，File 只读浏览客户端）**：新增 `bridge/FileBrowse`，只读消费 `GET /api/v1/file/targets` 与
+`GET /api/v1/file/directory`（所有查询字段 URL 编码），解析目标与有界目录页（`entries`/`next_cursor`/`truncated`）；
+`entries` 类型错误按畸形处理而不是“空目录”，失败原因映射为 `Misconfigured`/`Unauthorized`/`HttpStatus`/`Unreachable`。
+上传、下载、暂停/恢复/取消与 SAF 仍属 W16，本客户端不提供写入动作。新增 `FileBrowseTest` 5 项，Android 单测共 71 项通过。
+W16-01 仍未挂载设置页与成员/策略切片，保持 `[ ]`。
+
 ### W16-02 前台 VpnService 生命周期 `[ ]`
 
 - [ ] 使用前台服务承载 VpnService 和数据面；

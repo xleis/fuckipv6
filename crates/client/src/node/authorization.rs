@@ -205,19 +205,19 @@ impl NodeCommandContext {
     /// admission gate, and term-bound writes stay rejected there, so this does
     /// not widen authority.
     pub(crate) fn with_governance_snapshot(mut self, snapshot: &NodeSnapshot) -> Self {
-        self.governance_frozen_networks =
-            snapshot
-                .embedded_services
-                .iter()
-                .filter_map(|service| service.coordinator_candidates.as_ref())
-                .filter(|status| {
-                    status.emergency_leader.as_ref().is_some_and(|leader| {
-                        leader.state == CoordinatorEmergencyLeaderState::Active
-                    }) || (!status.control_plane.governance_writable
-                        && status.latest_term.is_some())
-                })
-                .map(|status| status.network_id.clone())
-                .collect();
+        self.governance_frozen_networks = snapshot
+            .embedded_services
+            .iter()
+            .filter_map(|service| service.coordinator_candidates.as_ref())
+            .filter(|status| {
+                status
+                    .emergency_leader
+                    .as_ref()
+                    .is_some_and(|leader| leader.state == CoordinatorEmergencyLeaderState::Active)
+                    || (!status.control_plane.governance_writable && status.latest_term.is_some())
+            })
+            .map(|status| status.network_id.clone())
+            .collect();
         self
     }
 

@@ -3181,6 +3181,30 @@ ICMP 5/5、TCP 262144 字节、UDP 64 包、虚拟 MTU 1280 边界）。逐例�
 cycle 7 时双向 P2P 均 healthy、ICMP 5/5、canary 12/12 通过、RSS/FD 采样正常；短周期预演（12 周期）verdict=ok。
 只有满 24 小时、`summary.verdict == "ok"`、无 peer/ICMP/canary 失败且 RSS/FD/临时文件无持续增长时，才勾选本项。
 
+**2026-11-21 浸泡中断与 7.2 小时实测记录**：该实例在运行到 cycle 434、`elapsed_seconds=25982.373`
+（7 小时 13 分）后停止，`soak/metrics.jsonl` 与 `run-state.json` 的最后心跳同为
+2026-11-20T17:45:20Z，`soak/summary.json` 未生成——进程随宿主会话结束而退出，不是网络或节点故障，
+`node1/node.log`、`host/host.log` 在最后一秒仍记录正常的 IPC 认证与 P2P pong。已取到的区间数据：
+
+- 双向 peer 全程 `online=true`、`p2p_active=true`、`p2p_healthy=true`、`loss_rate=0.0`，两侧
+  `error_count=0`；
+- 双向 ICMP 每周期 5/5 通过，`ping_1_to_2` 平均 RTT 在 4.9–38.6 ms 波动，`ping_2_to_1` 4.9–8.7 ms；
+- 节点 RSS 从约 18.8 MB 缓慢升到 21.3 MB、控制进程稳定在 4.5–4.6 MB，FD 计数全程 80/73 不变，
+  runtime 临时文件两个节点各 23 个、`errors=0`，无持续增长；
+- P2P 计数单调递增（约 18,100 包 / 12.85 MB 每侧），期间无重连。
+
+结论：7.2 小时连续会话稳定性成立且资源无泄漏迹象，但这不足以勾选本项——条目要求的是满 24 小时
+加上 `summary.verdict == "ok"`。重启后的实例必须以脱离宿主会话的方式运行（`setsid`），否则
+再次随会话结束中断，证据链仍然不完整。
+
+**2026-11-21 重启（脱离会话，仍进行中）**：按上一段的结论重建并重新启动。二进制来自提交
+`e5de708` 的 `cargo build --release -p fuckipv6-client --bin fuckipv6`（6 分 45 秒），
+`sha256(fuckipv6)` 前缀 `fe85d8df5af77ef1`，取代此前 2026-11-20 09:08 构建的实例。启动方式为
+`setsid nohup env W12_SOAK_WORK=/tmp/w12-soak-24h-r2 bash scripts/w12-rootless-netns.sh bash scripts/test-w12-soak-netns.sh`，
+即进程组与会话完全脱离，宿主的终端或 agent 会话结束不会再带走它。启动于 2026-11-20T22:02Z，
+拓扑与上一实例相同（三 netns 正式邀请入网 + 直连 P2P），cycle 1 已通过，预计
+2026-11-21T22:02Z 结束并写出 `soak/summary.json`。本实例跑满且 `verdict == "ok"` 后才勾选本项。
+
 **验收**：没有 24 小时稳定性与多场景证据时，不得给出“抗干扰强”或“长期可用”结论。
 
 ### W12-10 Exit 页面与活动 `[x]`

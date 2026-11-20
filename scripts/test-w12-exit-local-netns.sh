@@ -27,6 +27,13 @@ NETWORK="w12-exit"
 NSH="w12exith"
 NS1="w12exit1"
 NS2="w12exit2"
+# Role placement is configurable so the same topology can prove both directions:
+# the owner may be the coordinator netns (default) or a leaf netns with the
+# coordinator netns acting as an ordinary member.
+OWNER_NS="${W12_OWNER_NS:-$NSH}"
+CLIENT_NS="${W12_CLIENT_NS:-$NS1}"
+PEER_NS="${W12_PEER_NS:-$NS2}"
+OWNER_IP="${W12_OWNER_IP:-10.78.1.1}"
 VH1="w12ex1h"
 VN1="w12ex1n"
 VH2="w12ex2h"
@@ -542,7 +549,7 @@ raise SystemExit(0 if result["ok"] else 1)
 PY
     info "workdir=$WORK"
     info "binary=$(git -C "$ROOT" rev-parse HEAD) sha256=$(sha256sum "$BIN" | awk '{print $1}')"
-    info "topology: Coordinator netns $NSH 10.78.1.1:$HOST_PORT; node1 netns 10.78.1.2; node2 netns 10.78.2.2"
+    info "topology: owner netns $OWNER_NS $OWNER_IP:$HOST_PORT; client netns $CLIENT_NS; peer netns $PEER_NS"
 
     ip rule show >"$WORK/host-ip-rule.before"
     ip -6 rule show >"$WORK/host-ip6-rule.before"
@@ -580,7 +587,7 @@ PY
         FUCKIPV6_RUNTIME_DIR="$WORK/rejected/run" FUCKIPV6_CONFIG_DIR="$WORK/rejected/config")
     mkdir -p "$WORK"/{host,node1,node2,rejected}/{home,xdg,run,config}
     write_ipc_client
-    SOCKET_NS["$WORK/host/run/node.sock"]="$NSH"
+    SOCKET_NS["$WORK/host/run/node.sock"]="$OWNER_NS"
     local headless_state="$WORK/no-desktop"
     local headless_exec="$headless_state/exec-headless"
     mkdir -p "$headless_state/run-user" "$headless_state/x11"
@@ -603,9 +610,9 @@ SH
     cp /etc/nsswitch.conf "$WORK/nsswitch-before.txt"
 
     info "starting Coordinator in isolated netns with its owner membership active"
-    "$headless_exec" "$headless_state" ip netns exec "$NSH" "${host_env[@]}" RUST_LOG=debug "$BIN" host \
+    "$headless_exec" "$headless_state" ip netns exec "$OWNER_NS" "${host_env[@]}" RUST_LOG=debug "$BIN" host \
         --name "$NETWORK" --port "$HOST_PORT" --relay-port "$RELAY_PORT" \
-        --external-host 10.78.1.1 --headless --webui-port "$WEBUI_HOST" \
+        --external-host "$OWNER_IP" --headless --webui-port "$WEBUI_HOST" \
         >"$WORK/host/host.log" 2>&1 &
     HPID=$!
 
@@ -639,17 +646,17 @@ SH
     bootstrap_coordinator_governance "$HOST_SOCK" "$NETWORK" "$HOST_NODE_ID"
 
     info "starting two empty nodes in separate netns"
-    "$headless_exec" "$headless_state" ip netns exec "$NS1" "${node1_env[@]}" RUST_LOG=debug "$BIN" --headless --webui-port "$WEBUI1" \
+    "$headless_exec" "$headless_state" ip netns exec "$CLIENT_NS" "${node1_env[@]}" RUST_LOG=debug "$BIN" --headless --webui-port "$WEBUI1" \
         >"$WORK/node1/node.log" 2>&1 &
     N1PID=$!
-    "$headless_exec" "$headless_state" ip netns exec "$NS2" "${node2_env[@]}" RUST_LOG=debug "$BIN" --headless --webui-port "$WEBUI2" \
+    "$headless_exec" "$headless_state" ip netns exec "$PEER_NS" "${node2_env[@]}" RUST_LOG=debug "$BIN" --headless --webui-port "$WEBUI2" \
         >"$WORK/node2/node.log" 2>&1 &
     N2PID=$!
     NODE1_SOCK="$WORK/node1/run/node.sock"
     NODE2_SOCK="$WORK/node2/run/node.sock"
-    SOCKET_NS["$HOST_SOCK"]="$NSH"
-    SOCKET_NS["$NODE1_SOCK"]="$NS1"
-    SOCKET_NS["$NODE2_SOCK"]="$NS2"
+    SOCKET_NS["$HOST_SOCK"]="$OWNER_NS"
+    SOCKET_NS["$NODE1_SOCK"]="$CLIENT_NS"
+    SOCKET_NS["$NODE2_SOCK"]="$PEER_NS"
     wait_for_socket "$NODE1_SOCK" 60 || { tail -160 "$WORK/node1/node.log" >&2 || true; fail "node1 socket did not appear"; }
     wait_for_socket "$NODE2_SOCK" 60 || { tail -160 "$WORK/node2/node.log" >&2 || true; fail "node2 socket did not appear"; }
     snapshot_to "$NODE1_SOCK" "$WORK/node1-identity.json"
@@ -662,7 +669,7 @@ SH
 
     info "negative integration check: fk:// location ticket must not authorize InviteOnly membership"
     set +e
-    timeout --kill-after=5s 60s "$headless_exec" "$headless_state" ip netns exec "$NS1" "${rejected_env[@]}" RUST_LOG=debug "$BIN" join "$TICKET" \
+    timeout --kill-after=5s 60s "$headless_exec" "$headless_state" ip netns exec "$PEER_NS" "${rejected_env[@]}" RUST_LOG=debug "$BIN" join "$TICKET" \
         --name "$NETWORK" --start --headless --webui-port 18963 \
         >"$WORK/rejected/join.log" 2>&1
     REJECT_RC=$?
@@ -683,7 +690,7 @@ SH
     [ -n "$INVITE_CODE" ] && [ -n "$INVITATION_ID" ] || { cat "$WORK/invitation-created.json" >&2; fail "invitation creation returned no code/id"; }
     info "invitation_id=$INVITATION_ID max_uses=2"
 
-    local coordinator_url="ws://10.78.1.1:$HOST_PORT"
+    local coordinator_url="ws://$OWNER_IP:$HOST_PORT"
     local now_ms revision preview_digest terms_hash
     info "node1: preview then redeem formal invitation"
     preview_command=$(jq -cn --arg network "$NETWORK_ID" --arg url "$coordinator_url" --arg code "$INVITE_CODE" \
@@ -773,24 +780,24 @@ SH
 
     info "giving the Exit Node a dedicated NAT uplink"
     ip link add w12xu type veth peer name w12xn
-    ip link set w12xn netns "$NSH"
+    ip link set w12xn netns "$OWNER_NS"
     ip addr add 10.91.0.1/24 dev w12xu
     ip link set w12xu up
-    ip netns exec "$NSH" ip addr add 10.91.0.2/24 dev w12xn
-    ip netns exec "$NSH" ip link set w12xn up
-    ip netns exec "$NSH" ip route add default via 10.91.0.1
+    ip netns exec "$OWNER_NS" ip addr add 10.91.0.2/24 dev w12xn
+    ip netns exec "$OWNER_NS" ip link set w12xn up
+    ip netns exec "$OWNER_NS" ip route replace default via 10.91.0.1
     WAN_IF=$(ip route show default | awk '{print $5; exit}')
     [ -n "$WAN_IF" ] || fail "cannot determine the uplink interface for the Exit NAT"
     echo 1 >/proc/sys/net/ipv4/ip_forward
     iptables -A FORWARD -i w12xu -o "$WAN_IF" -j ACCEPT
     iptables -A FORWARD -i "$WAN_IF" -o w12xu -m state --state RELATED,ESTABLISHED -j ACCEPT
     iptables -t nat -A POSTROUTING -s 10.91.0.0/24 -o "$WAN_IF" -j MASQUERADE
-    ip netns exec "$NSH" curl -sS --max-time 20 https://ifconfig.me >"$WORK/exit-egress.txt" 2>&1 \
-        || { ip netns exec "$NSH" cat "$WORK/exit-egress.txt" >&2 || true; fail "the Exit Node has no internet egress"; }
+    ip netns exec "$OWNER_NS" curl -sS --max-time 20 https://ifconfig.me >"$WORK/exit-egress.txt" 2>&1 \
+        || { ip netns exec "$OWNER_NS" cat "$WORK/exit-egress.txt" >&2 || true; fail "the Exit Node has no internet egress"; }
     info "Exit Node egress: $(cat "$WORK/exit-egress.txt")"
 
     info "enabling and authorising the owner as the Exit Node"
-    ip netns exec "$NSH" env HOME="$WORK/host/home" XDG_CONFIG_HOME="$WORK/host/xdg" \
+    ip netns exec "$OWNER_NS" env HOME="$WORK/host/home" XDG_CONFIG_HOME="$WORK/host/xdg" \
         FUCKIPV6_RUNTIME_DIR="$WORK/host/run" FUCKIPV6_CONFIG_DIR="$WORK/host/config" \
         "$BIN" exit enable >"$WORK/exit-enable.txt" 2>&1 || fail "enabling the local Exit capability failed"
     role_command=$(jq -cn --arg n "$NETWORK" '{command:"set_network_role",payload:{network_name:$n,role:"exit_node",enabled:true}}')
@@ -842,8 +849,8 @@ SH
     ipc_command "$NODE1_SOCK" "$routing_command" >"$WORK/node1-routing.json" || fail "update_routing was rejected"
     TUN1=$(jq -r --arg n "$NETWORK" '.data.networks[]? | select(.name==$n) | .tun_name' "$WORK/node1-exit.json" | head -1)
     [ -n "$TUN1" ] && [ "$TUN1" != null ] || fail "the member did not report a TUN name"
-    ip netns exec "$NS1" ip route replace default dev "$TUN1"
-    ip netns exec "$NS1" ip -6 route replace default dev "$TUN1"
+    ip netns exec "$CLIENT_NS" ip route replace default dev "$TUN1"
+    ip netns exec "$CLIENT_NS" ip -6 route replace default dev "$TUN1"
     routed=0
     for ((i = 0; i < 60; i++)); do
         snapshot_to "$NODE1_SOCK" "$WORK/node1-routed.json" || true
@@ -869,16 +876,16 @@ SH
     info "traffic session: $(cat "$WORK/traffic-session.json")"
 
     info "capturing both sides of the tunnel during the download"
-    ip netns exec "$NS1" timeout 240 tcpdump -ni "$TUN1" -nn -c 20000 'tcp' >"$WORK/client-tun.txt" 2>"$WORK/client-tun.err" &
+    ip netns exec "$CLIENT_NS" timeout 240 tcpdump -ni "$TUN1" -nn -c 20000 'tcp' >"$WORK/client-tun.txt" 2>"$WORK/client-tun.err" &
     CLIENT_CAP=$!
     TUNH=$(jq -r --arg n "$NETWORK" '.data.networks[]? | select(.name==$n) | .tun_name' "$WORK/host-online.json" | head -1)
     [ -n "$TUNH" ] && [ "$TUNH" != null ] || fail "the owner did not report a TUN name"
-    ip netns exec "$NSH" timeout 240 tcpdump -ni "$TUNH" -nn -c 20000 'tcp' >"$WORK/exit-tun.txt" 2>"$WORK/exit-tun.err" &
+    ip netns exec "$OWNER_NS" timeout 240 tcpdump -ni "$TUNH" -nn -c 20000 'tcp' >"$WORK/exit-tun.txt" 2>"$WORK/exit-tun.err" &
     EXIT_CAP=$!
 
-    ip netns exec "$NS1" cat /etc/resolv.conf >"$WORK/member-resolv-after.txt" 2>&1 || true
-    ip netns exec "$NS1" ip -br addr show lo >"$WORK/member-lo.txt" 2>&1 || true
-    ip netns exec "$NS1" getent hosts speed.cloudflare.com >"$WORK/member-dns-check.txt" 2>&1 || true
+    ip netns exec "$CLIENT_NS" cat /etc/resolv.conf >"$WORK/member-resolv-after.txt" 2>&1 || true
+    ip netns exec "$CLIENT_NS" ip -br addr show lo >"$WORK/member-lo.txt" 2>&1 || true
+    ip netns exec "$CLIENT_NS" getent hosts speed.cloudflare.com >"$WORK/member-dns-check.txt" 2>&1 || true
     info "member resolver: $(tr '\n' ' ' <"$WORK/member-resolv-after.txt")"
     info "member lo: $(cat "$WORK/member-lo.txt")"
     info "member DNS check: $(tr '\n' ' ' <"$WORK/member-dns-check.txt")"
@@ -887,7 +894,7 @@ SH
     # The validated Exit path covers IPv4 only; IPv6 is intentionally failed
     # closed, so pin the client to IPv4 instead of racing a reachable-family
     # fallback.
-    ip netns exec "$NS1" curl -4 -sS --max-time 240 -o "$WORK/download.bin" \
+    ip netns exec "$CLIENT_NS" curl -4 -sS --max-time 240 -o "$WORK/download.bin" \
         -w '{"http_code":%{http_code},"size_download":%{size_download},"speed":%{speed_download}}\n' \
         "https://speed.cloudflare.com/__down?bytes=$DOWNLOAD_BYTES" >"$WORK/download.json" 2>"$WORK/download.err" \
         || { cat "$WORK/download.err" >&2 || true; fail "the non-browser download through the Exit failed"; }
@@ -906,7 +913,7 @@ SH
         '{client_tun_packets:$client, exit_tun_packets:$exit_packets}' >"$WORK/tunnel-evidence.json"
 
     info "verifying DNS resolution inside the protected member namespace"
-    ip netns exec "$NS1" getent hosts www.youtube.com >"$WORK/dns-member.txt" 2>&1 || true
+    ip netns exec "$CLIENT_NS" getent hosts www.youtube.com >"$WORK/dns-member.txt" 2>&1 || true
     [ -s "$WORK/dns-member.txt" ] || fail "protected DNS resolution returned nothing"
 
     info "stopping the network through the production command bus"
@@ -915,13 +922,13 @@ SH
     ipc_command "$HOST_SOCK" "$stop_command" >"$WORK/stop-host.json"
     waited=0
     while [ "$waited" -lt 60 ]; do
-        if ! ip netns exec "$NS1" ip link show | grep -q "fk-"; then break; fi
+        if ! ip netns exec "$CLIENT_NS" ip link show | grep -q "fk-"; then break; fi
         sleep 1
         waited=$((waited + 1))
     done
-    ip netns exec "$NS1" ip link show | grep -q "fk-" && fail "the member TUN survived stop_networks"
-    ip netns exec "$NSH" ip link show | grep -q "fk-" && fail "the owner TUN survived stop_networks"
-    ip netns exec "$NS1" ip -6 route show >"$WORK/member-routes-after.txt" 2>&1
+    ip netns exec "$CLIENT_NS" ip link show | grep -q "fk-" && fail "the member TUN survived stop_networks"
+    ip netns exec "$OWNER_NS" ip link show | grep -q "fk-" && fail "the owner TUN survived stop_networks"
+    ip netns exec "$CLIENT_NS" ip -6 route show >"$WORK/member-routes-after.txt" 2>&1
     grep -qE 'fd00::/64|fd00::100' "$WORK/member-routes-after.txt" && fail "virtual routes survived stop_networks"
     cmp -s "$WORK/resolv-before.txt" /etc/resolv.conf \
         || { diff -u "$WORK/resolv-before.txt" /etc/resolv.conf >&2 || true; fail "the resolver configuration was not restored after stop"; }

@@ -2867,6 +2867,14 @@ Exit 贡献策略（W12-02 的贡献治理）后再复跑 `scripts/test-w12-exit
 slirp 上行，WAN 版 `scripts/test-w12-exit-download-wan.sh` 仍受"slirp NAT 下 `p2p_healthy=false`、Exit readiness
 需要健康 P2P"限制，"两侧 Exit 可达"（以 Exit 作客户端反向验证）未完成。因此本项保持 `[~]`。
 
+**2026-11-20 两侧 Exit 可达（隔离 netns 镜像验收）**：`scripts/test-w12-exit-local-netns.sh` 增加角色摆位参数
+（`W12_OWNER_NS/W12_CLIENT_NS/W12_PEER_NS/W12_OWNER_IP`），同一拓扑可让 owner 位于协调者 netns 或叶子 netns。
+镜像运行（owner=`w12exit2`/10.78.2.2 当 Exit，协调者 netns 当成员客户端）通过：8 MiB HTTP 200、客户端 TUN
+17,160 包与 Exit TUN 17,160 包、`traffic_session` 从 `fail_closed(exit_unavailable)` 自动恢复为 `protected`、
+DNS/NSS 停止后逐字节恢复，证据 `/tmp/w12-exit-local.20261120T152050Z.568414`。默认摆位在参数化后同样复跑通过
+（`/tmp/w12-exit-local.20261120T141143Z.320177` 与本次之前一次 17,022/16,998 包）。两侧证据均来自隔离 netns，
+WAN 侧仍受下述环境限制。
+
 **2026-11-20 WAN 版复跑结论**：`scripts/test-w12-exit-download-wan.sh` 已补齐与本地版相同的授权链（远端 IPC 改为
 stdin 传 JSON、候选声明 15 分钟上限并在会话前刷新、`apply_policy` 贡献策略、`exit_contribution_mode=autonomous`、
 Exit 目录固定选择、owner terms 确认）。在无 root 的 slirp 上行环境中仍无法进入 protected：
@@ -3046,10 +3054,14 @@ IPv4 `/32`、IPv6 `/128` TUN 路由在传输前后保持存在，未创建 IPv4 
 - [ ] 覆盖网络切换、休眠、唤醒和长时间空闲；
 - [x] 两个独立 netns/节点同网后完成双向 ICMP，并捕获直接 P2P UDP；
 - [x] 真实香港节点同网后完成 IPv4/IPv6 双向 TCP 262144 字节与 UDP 65536 字节/64 包负载；
-- [ ] 分别验证两侧 Exit 可达；
-  证据边界（2026-11-20）：成员侧到 Exit 已双向验证（客户端 TUN 捕获 17,512 包含回程、Exit TUN 17,497 包），
-  Exit 到外网也已验证（`exit-egress.txt` 返回出口公网地址）；"以 Exit 作客户端"的镜像场景（另一侧节点当 Exit、
-  原 owner 当客户端）尚未执行，故本项保持未勾选；
+- [x] 分别验证两侧 Exit 可达；
+  证据（2026-11-20，隔离 netns 两种角色摆位）：①owner 在协调者 netns 当 Exit、成员 netns 当客户端：客户端 TUN
+  17,512 包含回程、Exit TUN 17,497 包、`exit-egress.txt` 返回出口公网地址；②镜像摆位 owner 在叶子 netns
+  （10.78.2.2）当 Exit、协调者 netns 作为普通成员当客户端：8 MiB HTTP 200、客户端 TUN 17,160 包、Exit TUN
+  17,160 包、DNS/NSS 逐字节恢复。两种摆位都由 `scripts/test-w12-exit-local-netns.sh` 通过
+  `W12_OWNER_NS/W12_CLIENT_NS/W12_PEER_NS/W12_OWNER_IP` 参数化复跑（证据
+  `/tmp/w12-exit-local.20261120T152050Z.568414`）。镜像摆位的会话还记录了
+  `fail_closed(exit_unavailable) → 重新选路 → protected` 的恢复过程。该证据范围是隔离 netns，不含 WAN；
 - [ ] 运行 24 小时持续会话并记录失败/恢复；
 - [ ] 监控内存、连接、文件描述符和临时文件增长；
 - [ ] 测试结束自动清理 TUN、路由、DNS 和子进程；

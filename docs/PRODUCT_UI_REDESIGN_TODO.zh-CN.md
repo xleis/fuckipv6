@@ -4365,6 +4365,9 @@ Android 单测共 125 项通过。加入申请审批（`review_join_request`）�
 > 传输（`TunnelTransports`）当前未绑定，服务在 `Preparing` 后**直接失败关闭并自停**，因为"建立了 TUN 却没有包路径"等于谎报连通；
 > manifest 已声明 `BIND_VPN_SERVICE`、`foregroundServiceType=specialUse` 与 `POST_NOTIFICATIONS`（未授权时只跳过非前台进度通知，
 > 不影响隧道）。`TunnelStateTest` 5 项覆盖迁移、拒绝乱序/重复请求、配置校验与 action 白名单，Android 单测共 137 项通过。
+> 补充（2026-11-21）：生命周期决策抽到 `service/TunnelEngine`（接口工厂 + 传输句柄两个抽象），只有“接口建立且传输接受”才
+> 进入 `Running`，五条失败路径先清理再报 `Failed`，重复 start/stop 为 no-op；`FuckIpv6VpnService` 退化为薄壳，只做
+> `Builder.establish`、前台通知、`onRevoke` 与销毁。`TunnelEngineTest` 6 项覆盖上述路径，Android 单测共 143 项通过。
 > **未完成**：真机前台服务生命周期、`startForeground` 在目标 API 上的行为、关闭 Activity/进程被杀/系统重启恢复、真实包转发
 > （需要节点数据面在 Android 上暴露传输，属后续工作）。因此本项保持 `[ ]`。
 

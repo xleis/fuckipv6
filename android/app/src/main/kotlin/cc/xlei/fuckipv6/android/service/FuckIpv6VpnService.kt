@@ -12,16 +12,25 @@ import cc.xlei.fuckipv6.android.MainActivity
 import cc.xlei.fuckipv6.android.R
 
 /**
- * Foreground VpnService skeleton for the tunnel.
+ * Foreground VpnService for the tunnel.
  *
- * The service owns the TUN interface and the notification; the packet transport
- * is a separate, currently unbound dependency. Until a transport is bound the
- * service fails closed and stops itself rather than reporting a tunnel that
- * cannot carry packets.
+ * The service only owns platform concerns (TUN interface, foreground state,
+ * notification); the lifecycle decisions live in [TunnelEngine] so they can be
+ * tested without a device. While no packet transport is bound the engine fails
+ * closed, which means this service never reports a tunnel that cannot carry
+ * packets.
  */
 class FuckIpv6VpnService : VpnService() {
-    private var tun: ParcelFileDescriptor? = null
-    private var configuredNetwork: String? = null
+    private var preparedNetwork: String? = null
+
+    private val engine: TunnelEngine by lazy {
+        TunnelEngine(
+            interfaces = TunnelInterfaceFactory { config -> establishInterface(config) },
+            transport = {
+                TunnelTransports.current?.let { transport -> TransportAdapter(transport) }
+            },
+        )
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -29,115 +38,87 @@ class FuckIpv6VpnService : VpnService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val action = intent?.action
-        if (!TunnelActions.isKnown(action)) {
-            return START_NOT_STICKY
-        }
-        when (action) {
+        when (intent?.action) {
             TunnelActions.ACTION_START -> startTunnel(intent)
             TunnelActions.ACTION_STOP -> stopTunnel()
+            else -> return START_NOT_STICKY
         }
         return START_NOT_STICKY
     }
 
-    private fun startTunnel(intent: Intent?) {
-        if (TunnelStateStore.state is TunnelState.Running) {
-            return
-        }
-        TunnelStateStore.apply(TunnelState.Preparing)
+    private fun startTunnel(intent: Intent) {
         val config = configFrom(intent)
-        val configError = config?.validationError()
-        if (config == null || configError != null) {
-            fail(configError ?: "state.error.detail")
+        if (config == null) {
+            finish(TunnelState.Failed("state.error.detail"))
             return
         }
-        val transport = TunnelTransports.current
-        if (transport == null) {
-            // No packet path exists yet: establishing TUN would be a lie.
-            fail("state.unsupported.detail")
-            return
-        }
+        preparedNetwork = config.networkName
         promoteToForeground(config)
-        val builder = Builder()
-            .setSession(config.networkName)
-            .setMtu(config.mtu)
-            .addAddress(config.addressV4.substringBefore('/'), prefix(config.addressV4))
-            .addRoute("0.0.0.0", 0)
-        config.addressV6?.let { v6 ->
-            builder.addAddress(v6.substringBefore('/'), prefix(v6))
-        }
-        config.dnsServers.forEach { builder.addDnsServer(it) }
-        val established = try {
-            builder.establish()
-        } catch (error: Exception) {
-            logQuietly("establish failed", error)
-            null
-        }
-        if (established == null) {
-            fail("state.error.detail")
-            return
-        }
-        val started = runCatching { transport.start(config, established) }
-        if (started.isFailure) {
-            runCatching { established.close() }
-            fail("state.error.detail")
-            return
-        }
-        tun = established
-        configuredNetwork = config.networkName
-        TunnelStateStore.apply(TunnelState.Running)
-        notifyState(R.string.app_name, "隧道运行中 / tunnel running")
+        finish(engine.start(config))
     }
 
     private fun stopTunnel() {
-        TunnelStateStore.apply(TunnelState.Stopping)
-        runCatching { TunnelTransports.current?.stop() }
-        runCatching { tun?.close() }
-        tun = null
-        configuredNetwork = null
-        TunnelStateStore.apply(TunnelState.Stopped)
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
+        finish(engine.stop())
     }
 
-    private fun fail(reasonKey: String) {
-        TunnelStateStore.apply(TunnelState.Failed(reasonKey))
-        runCatching { TunnelTransports.current?.stop() }
-        runCatching { tun?.close() }
-        tun = null
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
+    /**
+     * Reflects the engine's decision: a running tunnel keeps the foreground
+     * notification, anything else tears it down and stops the service.
+     */
+    private fun finish(state: TunnelState) {
+        when (state) {
+            is TunnelState.Running -> notifyState(state)
+            else -> {
+                preparedNetwork = null
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
+        }
     }
 
     override fun onRevoke() {
-        // The OS withdrew the interface: the tunnel is gone whether or not the
-        // transport noticed, so report it as failed instead of "stopped".
-        fail("state.offline.detail")
+        finish(engine.revoked())
         super.onRevoke()
     }
 
     override fun onDestroy() {
-        runCatching { TunnelTransports.current?.stop() }
-        runCatching { tun?.close() }
-        tun = null
         if (TunnelStateStore.state.isActive) {
             TunnelStateStore.apply(TunnelState.Stopped)
         }
         super.onDestroy()
     }
 
-    private fun configFrom(intent: Intent?): TunnelConfig? {
-        intent ?: return null
-        val networkName = intent.getStringExtra(EXTRA_NETWORK_NAME) ?: return null
-        val addressV4 = intent.getStringExtra(EXTRA_ADDRESS_V4) ?: return null
-        val mtu = intent.getIntExtra(EXTRA_MTU, DEFAULT_MTU)
-        val dns = intent.getStringArrayListExtra(EXTRA_DNS) ?: emptyList()
-        val addressV6 = intent.getStringExtra(EXTRA_ADDRESS_V6)
-        return TunnelConfig(networkName, addressV4, addressV6, mtu, dns)
+    /** Real TUN establishment, kept out of the engine so the engine stays pure. */
+    private fun establishInterface(config: TunnelConfig): TunnelInterfaceHandle? {
+        val builder = Builder()
+            .setSession(config.networkName)
+            .setMtu(config.mtu)
+            .addAddress(config.addressV4.substringBefore('/'), prefix(config.addressV4))
+            .addRoute("0.0.0.0", 0)
+        config.addressV6?.let { builder.addAddress(it.substringBefore('/'), prefix(it)) }
+        config.dnsServers.forEach { builder.addDnsServer(it) }
+        val descriptor = try {
+            builder.establish()
+        } catch (error: Exception) {
+            Log.w(TAG, "interface establishment failed: ${error.javaClass.simpleName}")
+            null
+        } ?: return null
+        return TunHandle(descriptor)
     }
 
-    private fun prefix(value: String): Int =
-        value.substringAfter('/', "32").toIntOrNull() ?: 32
+    private fun configFrom(intent: Intent): TunnelConfig? {
+        val networkName = intent.getStringExtra(EXTRA_NETWORK_NAME) ?: return null
+        val addressV4 = intent.getStringExtra(EXTRA_ADDRESS_V4) ?: return null
+        return TunnelConfig(
+            networkName = networkName,
+            addressV4 = addressV4,
+            addressV6 = intent.getStringExtra(EXTRA_ADDRESS_V6),
+            mtu = intent.getIntExtra(EXTRA_MTU, DEFAULT_MTU),
+            dnsServers = intent.getStringArrayListExtra(EXTRA_DNS) ?: emptyList(),
+        )
+    }
+
+    private fun prefix(value: String): Int = value.substringAfter('/', "32").toIntOrNull() ?: 32
 
     private fun ensureChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -163,25 +144,18 @@ class FuckIpv6VpnService : VpnService() {
         )
         val notification = android.app.Notification.Builder(this, CHANNEL_ID)
             .setContentTitle(config.networkName)
-            .setContentText("隧道已连接 / tunnel connected")
+            .setContentText("正在建立隧道 / preparing tunnel")
             .setSmallIcon(R.drawable.ic_brand_mark)
             .setContentIntent(openApp)
             .addAction(
-                android.app.Notification.Action.Builder(
-                    null,
-                    "停止 / Stop",
-                    stop,
-                ).build(),
+                android.app.Notification.Action.Builder(null, "停止 / Stop", stop).build(),
             )
             .setOngoing(true)
             .build()
         startForeground(NOTIFICATION_ID, notification)
     }
 
-    private fun notifyState(titleRes: Int, text: String) {
-        // Posting a non-foreground update needs POST_NOTIFICATIONS on Android 13+.
-        // The foreground notification itself is exempt, so a missing grant only
-        // costs the progress text, never the tunnel.
+    private fun notifyState(state: TunnelState) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
             android.content.pm.PackageManager.PERMISSION_GRANTED
@@ -189,8 +163,14 @@ class FuckIpv6VpnService : VpnService() {
             return
         }
         val manager = getSystemService(NotificationManager::class.java) ?: return
+        val title = preparedNetwork ?: getString(R.string.app_name)
+        val text = if (state is TunnelState.Running) {
+            "隧道运行中 / tunnel running"
+        } else {
+            "隧道不可用 / tunnel unavailable"
+        }
         val notification = android.app.Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle(getString(titleRes))
+            .setContentTitle(title)
             .setContentText(text)
             .setSmallIcon(R.drawable.ic_brand_mark)
             .setOngoing(true)
@@ -198,9 +178,25 @@ class FuckIpv6VpnService : VpnService() {
         runCatching { manager.notify(NOTIFICATION_ID, notification) }
     }
 
-    private fun logQuietly(message: String, error: Throwable) {
-        // Never log interface addresses or keys; only the failure class.
-        Log.w(TAG, "$message: ${error.javaClass.simpleName}")
+    /** Wraps the platform descriptor so the engine only sees a handle. */
+    private class TunHandle(private val descriptor: ParcelFileDescriptor) : TunnelInterfaceHandle {
+        fun fileDescriptor(): ParcelFileDescriptor = descriptor
+        override fun close() {
+            runCatching { descriptor.close() }
+        }
+    }
+
+    /** Adapts the app-level transport to the engine's narrower contract. */
+    private class TransportAdapter(
+        private val transport: TunnelTransport,
+    ) : TunnelTransportHandle {
+        override fun start(config: TunnelConfig, handle: TunnelInterfaceHandle): Result<Unit> {
+            val descriptor = (handle as? TunHandle)?.fileDescriptor()
+                ?: return Result.failure(IllegalStateException("unexpected tunnel handle"))
+            return transport.start(config, descriptor)
+        }
+
+        override fun stop() = transport.stop()
     }
 
     companion object {
@@ -214,16 +210,14 @@ class FuckIpv6VpnService : VpnService() {
         const val EXTRA_DNS = "dns"
         private const val TAG = "FuckIpv6Vpn"
 
-        fun startIntent(
-            context: android.content.Context,
-            config: TunnelConfig,
-        ): Intent = Intent(context, FuckIpv6VpnService::class.java)
-            .setAction(TunnelActions.ACTION_START)
-            .putExtra(EXTRA_NETWORK_NAME, config.networkName)
-            .putExtra(EXTRA_ADDRESS_V4, config.addressV4)
-            .putExtra(EXTRA_ADDRESS_V6, config.addressV6)
-            .putExtra(EXTRA_MTU, config.mtu)
-            .putStringArrayListExtra(EXTRA_DNS, ArrayList(config.dnsServers))
+        fun startIntent(context: android.content.Context, config: TunnelConfig): Intent =
+            Intent(context, FuckIpv6VpnService::class.java)
+                .setAction(TunnelActions.ACTION_START)
+                .putExtra(EXTRA_NETWORK_NAME, config.networkName)
+                .putExtra(EXTRA_ADDRESS_V4, config.addressV4)
+                .putExtra(EXTRA_ADDRESS_V6, config.addressV6)
+                .putExtra(EXTRA_MTU, config.mtu)
+                .putStringArrayListExtra(EXTRA_DNS, ArrayList(config.dnsServers))
 
         fun stopIntent(context: android.content.Context): Intent =
             Intent(context, FuckIpv6VpnService::class.java)

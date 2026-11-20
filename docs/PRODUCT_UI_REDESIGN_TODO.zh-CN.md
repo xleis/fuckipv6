@@ -4142,6 +4142,14 @@ debug 测试构建；命令为
 销毁时取消轮询。当前 `files` 页面已可展示真实能力状态；命令通道（成员/策略/角色等写入）、传输动作、VpnService 与 SAF 仍未实现，
 因此 W16-01 保持 `[ ]`。
 
+**补充（2026-11-20，命令通道）**：新增 `bridge/CommandJson`、`bridge/NodeCommandClient`、`bridge/NodeCommandBridge`。
+请求按协议编码为 `{schema_version, request{request_id, command{command, payload}}, idempotency_key?}`，提交走
+`POST /api/v1/commands`，随后用 `GET /api/v1/operations/{id}` 跟随操作：`queued/running/waiting_for_*` 只投影为
+`InFlight`，仅 `succeeded` 计为成功，`failed/cancelled/timed_out` 与 4xx `problem` 投影为带稳定 `problemCode`/`messageKey`
+的拒绝，200 但缺少 `operation`/`result` 视为 malformed；轮询有上限，超时按 `node.error.operation_timeout` 失败关闭。
+`CommandBridgeTest` 9 项覆盖编码、URL、各状态映射与轮询上限，Android 单测共 41 项通过。页面动作接线仍需先把手里的
+快照映射成生成 DTO（Relay/AdminRecovery 页的 `onSetRelayRole` 等回调已就绪），因此 W16-01 保持 `[ ]`。
+
 ### W16-02 前台 VpnService 生命周期 `[ ]`
 
 - [ ] 使用前台服务承载 VpnService 和数据面；

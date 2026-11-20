@@ -599,6 +599,9 @@ exec unshare --mount --propagation private bash -c '
 SH
     chmod +x "$headless_exec"
 
+    cp /etc/resolv.conf "$WORK/resolv-before.txt"
+    cp /etc/nsswitch.conf "$WORK/nsswitch-before.txt"
+
     info "starting Coordinator in isolated netns with its owner membership active"
     "$headless_exec" "$headless_state" ip netns exec "$NSH" "${host_env[@]}" RUST_LOG=debug "$BIN" host \
         --name "$NETWORK" --port "$HOST_PORT" --relay-port "$RELAY_PORT" \
@@ -920,11 +923,16 @@ SH
     ip netns exec "$NSH" ip link show | grep -q "fk-" && fail "the owner TUN survived stop_networks"
     ip netns exec "$NS1" ip -6 route show >"$WORK/member-routes-after.txt" 2>&1
     grep -qE 'fd00::/64|fd00::100' "$WORK/member-routes-after.txt" && fail "virtual routes survived stop_networks"
+    cmp -s "$WORK/resolv-before.txt" /etc/resolv.conf \
+        || { diff -u "$WORK/resolv-before.txt" /etc/resolv.conf >&2 || true; fail "the resolver configuration was not restored after stop"; }
+    cmp -s "$WORK/nsswitch-before.txt" /etc/nsswitch.conf \
+        || { diff -u "$WORK/nsswitch-before.txt" /etc/nsswitch.conf >&2 || true; fail "the NSS configuration was not restored after stop"; }
+    info "resolver and NSS configuration restored exactly"
 
     jq -n --slurpfile dl "$WORK/download.json" --slurpfile tun "$WORK/tunnel-evidence.json" \
         --arg sha "$(cut -d' ' -f1 "$WORK/download.sha256")" \
         '{download:$dl[0], sha256:$sha, tunnel:$tun[0], tun_removed:true, routes_removed:true,
-          exit_egress_path:true}' >"$WORK/SUMMARY.json"
+          dns_restored:true, nsswitch_restored:true, exit_egress_path:true}' >"$WORK/SUMMARY.json"
     info "PASS: the member downloaded the file through the Exit, both TUN captures saw the flow, and stop removed TUN and routes"
     cat "$WORK/SUMMARY.json"
     info "evidence retained at $WORK"

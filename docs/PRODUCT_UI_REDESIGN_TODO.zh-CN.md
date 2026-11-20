@@ -2859,8 +2859,9 @@ Exit 贡献策略（W12-02 的贡献治理）后再复跑 `scripts/test-w12-exit
 结果：成员 `traffic_session.state = protected`（tun/routes/dns/reachability 四项验证通过），`curl -4` 下载
 8388608 字节 HTTP 200、1.26 MB/s、SHA-256 `f38469a7…ae7b`；**客户端 TUN 抓包 17,512 包、Exit TUN 抓包
 17,497 包**，两侧看到同一条流，证明流量确实经过 Exit 而不是回退直连；DNS 由 DoH 接管（`127.0.0.2`）；
-`stop_networks` 后 TUN 与虚拟路由清除。证据目录
-`/tmp/w12-exit-local.20261120T120134Z.4033533`（`SUMMARY.json`、`client-tun.txt`、`exit-tun.txt`）。
+`stop_networks` 后 TUN 与虚拟路由清除。随后一次运行（`/tmp/w12-exit-local.20261120T120609Z.4053743`，HTTP 200、
+8388608 字节、SHA-256 同上、客户端 17,548 包 / Exit 17,521 包）进一步断言 `resolv.conf` 与 `nsswitch.conf`
+在停止后**逐字节恢复**（`dns_restored=true`、`nsswitch_restored=true`），即"自动 DNS 清理"已有实机证据。
 
 边界：本次只验证 IPv4 Exit 路径（IPv6 探针 30 秒超时，客户端对 IPv6 按 fail-closed 处理）；拓扑是隔离 netns +
 slirp 上行，WAN 版 `scripts/test-w12-exit-download-wan.sh` 仍受"slirp NAT 下 `p2p_healthy=false`、Exit readiness

@@ -4880,6 +4880,15 @@ Android 前台服务未实现）；第 5 条的 TUN 残留问题仍有 2026-11-1
 「所有失败」这个全称还没有一份汇总证据；第 7 条与第 5 条同源。第 8 条需要把 W12 干扰矩阵、W14
 脑裂/断电矩阵、W2 生命周期用例合并成一份清单，目前散落在三个工作包里。
 
+**补充（2026-11-21，无桌面环境实跑）**：在有桌面会话的主机上，这些用例默认按产品策略跳过（
+`skip_webui_lifetime_test_on_desktop`），所以"本地通过"此前可能是跳过。本轮以
+`env -u DISPLAY -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE -u XDG_CURRENT_DESKTOP -u DESKTOP_SESSION`
+实跑 `cargo test -p fuckipv6-client --test w2_runtime_process`，**11 项全过**（3.92 s），包括
+`closing_headless_webui_does_not_stop_the_node`、`new_headless_ui_restarts_crashed_control_and_adopts_live_node`、
+`stopping_data_plane_keeps_control_and_webui_available` 与 `service_process_owns_control_and_stops_node_on_termination`，
+即前三条的证据在无桌面环境下真实成立而非被跳过。同批用例在 Linux gate 的全量并行运行中曾有 4 项以
+「WebUI 未在期限内监听」失败，就绪轮询预算按四核满载余量放宽十倍后仍空闲即返回，语义不变。
+
 ### W18-09 平台发布门禁 `[ ]`
 
 - [ ] Linux 实机报告；

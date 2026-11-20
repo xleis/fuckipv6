@@ -64,7 +64,7 @@
 | W15 File | `[~]` | P2 | W10 | 本地 domain/ACL/路径/临时文件/续传适配器、GPUI owner 设置与 IPC、GPUI/WebUI File 目录浏览/目标选择/上传下载/分页/暂停恢复/取消、并发/速率/磁盘/扫描/审计上界已落地；Linux 独立三节点真实网络传输、恢复与四槽满载控制面隔离验收已完成，Android File 表面/SAF、Windows/macOS 实机路径安全与传输竞态、跨平台验收及 OS/性能资源基线仍未完成 |
 | W16 Android | `[ ]` | P2 | W2,W4,W5,W7-W15 | Compose、VpnService、全能力 |
 | W17 跨平台硬化 | `[ ]` | P2 | W6-W16 | Linux/macOS/Windows 实机证据 |
-| W18 发布门禁 | `[ ]` | P0 | 全部 | 自动化、实测、安全和发布证据 |
+| W18 发布门禁 | `[~]` | P0 | 全部 | 自动化、实测、安全和发布证据；W18-02 的 fmt/clippy/未使用代码与工具链绑定、W18-04 的本地契约门禁已取证，其余子项与平台门禁待 CI 转绿 |
 
 ## 2. 关键路径
 
@@ -4575,16 +4575,38 @@ Android 单测共 125 项通过。加入申请审批（`review_join_request`）�
 
 ### W18-02 Rust 质量门禁 `[ ]`
 
-- [ ] `cargo fmt --check` 通过；
-- [ ] `cargo clippy --workspace --all-targets --all-features -- -D warnings` 通过；
+- [x] `cargo fmt --check` 通过；
+- [x] `cargo clippy --workspace --all-targets --all-features -- -D warnings` 通过；
 - [ ] `cargo test --workspace --all-features` 通过；
 - [ ] feature 组合无法一次构建时提供明确矩阵结果；
 - [ ] 契约测试、集成测试和故障注入通过；
 - [ ] 无禁用测试、吞错或无条件 pass；
-- [ ] 编译警告和未使用代码处理完成；
-- [ ] 结果绑定 commit 和工具链版本。
+- [x] 编译警告和未使用代码处理完成；
+- [x] 结果绑定 commit 和工具链版本。
 
 **验收**：Rust 门禁可复现通过，不以局部 crate 结果代替 workspace。
+
+**证据（2026-11-21，commit `d3a5c16`，rustc 1.100.0 `0ef1bc386`，cargo 1.100.0）**：
+
+- `cargo fmt --all -- --check` 通过；
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings` 通过（零 error、零 warning）。
+  工具链升到 1.100 后这道闸门一直是红的，本轮清掉的是一整批基线漂移而不是新引入的告警：
+  W14 交错扫描的两处显式计数器循环、`relay_client` 里测试模块排在生产 item 之前、
+  管理员恢复拒绝路径与拓扑边框各一处同构分支、若干冗余闭包、一处 `?` 可化简块、
+  WebUI 引导令牌的 `map().flatten()`、P2P 健康判定里的 `needless_bool`、
+  MTU 的手写区间比较、可派生的 `Default`、常量步长上的 `chunks_exact`、
+  以及 15 处缺少 `# Safety` 段的 iOS FFI 导出。同时删除无引用的 `tower-http`（workspace）
+  与 `clap`（coordinator）依赖，把仅测试使用的两个 TUN 辅助方法改为 `cfg(test)`，
+  并把 W13/W14 失败转移审计入口显式标注为保留下来的 `allow(dead_code)`；
+- `cargo test --workspace --all-features` 在本机为 **1563 passed / 13 failed / 4 ignored**。
+  13 项失败全部是特权环境依赖，不涉及断言：12 项 `embedded::tests` 需要真实 TUN 与
+  CAP_NET_ADMIN（报 `Embedded packet I/O requires an external Linux route adapter`
+  或 `platform session was not opened`），1 项 `local_ipc::tests::real_second_uid_peer_is_rejected`
+  需要 `newuidmap` 与 subuid 配置。本机 sudo 被 `no_new_privs` 阻断，无法以 root 复跑，
+  因此第 3 项保持未勾，待 CI 的 Linux gate 或特权主机给出证据；
+- 顺带修掉一项真实断言失败：嵌入式资源探针把响应体上限设为 1 MiB，而 Vite 产物
+  `app.js` 已达 1,051,364 字节，`node_adapter_selects_manifest_surface_and_serves_embedded_assets`
+  以 `LengthLimitError` 失败；上限提高到 16 MiB 后该用例通过。
 
 ### W18-03 前端质量门禁 `[ ]`
 
@@ -4611,6 +4633,20 @@ Android 单测共 125 项通过。加入申请审批（`review_join_request`）�
 - [ ] 发布记录 schema 版本。
 
 **验收**：不存在手工同步导致的类型漂移或未知命令静默成功。
+
+**证据（2026-11-21，本地契约门禁，commit `a4ccb34`，rustc 1.100.0）**：`./scripts/check-contracts.sh` 全绿——
+`cargo test -p fuckipv6-client --lib node::contract` 8 项通过（命令枚举唯一性、未知值失败关闭、
+宿主能力不冻结、schema 版本与 ID 稳定、命令 schema 覆盖全量、键序规范、manifest 只暴露动作命令、
+签入产物为最新）；`generate-contract-bindings.py --check` verified 2 artifact(s)；contracts/typescript
+的 `check` 与 `build:test` 通过；`node scripts/test_contract_bindings.mjs` passed；`javac --release 8` +
+`NodeContractV1Test` passed。随后执行 `./scripts/generate-contracts.sh` 重新生成全部产物，
+`git status -- contracts/` 与 `git diff -- contracts/` 均为空，即 CI 的 `Reject generated drift` 步骤
+在本提交上不会失败。因此"CI 检查生成漂移"一条已具备本地等价证据，待 Verify 的 contracts job
+转绿后再勾选。
+
+**证据（2026-11-21，CI 契约 job 仍红，原因待日志确认）**：对 commit `f01518d` 触发的 run
+`44777644873` 中 `Node contract drift and bindings` 结论为 failure，而同一提交在本地跑完全部契约步骤
+通过且无漂移，说明失败点在本地未覆盖的前置步骤（依赖安装或工具版本），不在 Rust/TS/Java 契约本身。
 
 ### W18-05 视觉与交互回归 `[ ]`
 

@@ -4305,6 +4305,12 @@ File/Relay/Coordinator/AdminRecovery；AdminRecovery 的网络名/id 只取快�
 （否则节点 400、流无法启动）。新增两项回归，Android 单测共 110 项通过。W16-01 仍因外壳文件被并发改动占用而无法挂载，
 保持 `[ ]`。
 
+**补充（2026-11-21，桥接 HTTP 集成测试）**：新增自建 `TestHttpServer`（`ServerSocket` 最小 HTTP/1.1 实现，Android 单测
+classpath 无 `com.sun.net.httpserver`）与 `HttpBridgeIntegrationTest` 6 项，用生产 `HttpURLConnection` 客户端做真实往返：
+Bearer 头、快照全切片解析、401 单次失败不重试、命令 POST 信封与操作跟随、浏览查询编码、事件流 `after` + `Last-Event-ID`
+双携带与可续传快照帧、连接被拒返回 `Unreachable`。这补上了此前只有 fake transport 覆盖的传输层。Android 单测共 116 项通过。
+W16-01 仍因外壳文件被并发改动占用而无法挂载，保持 `[ ]`。
+
 ### W16-02 前台 VpnService 生命周期 `[ ]`
 
 - [ ] 使用前台服务承载 VpnService 和数据面；

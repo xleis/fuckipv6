@@ -68,6 +68,7 @@ object SnapshotJsonParser {
                 snapshotRevision = snapshot.optLongOrNull("revision"),
             ),
             relay = relaySurface(snapshot),
+            coordinator = coordinatorSurface(snapshot),
         )
     }
 

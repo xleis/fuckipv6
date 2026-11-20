@@ -24,6 +24,7 @@ import cc.xlei.fuckipv6.android.bridge.NodeBridge
 import cc.xlei.fuckipv6.android.bridge.NodeCommandBridge
 import cc.xlei.fuckipv6.android.bridge.NodeCommandClient
 import cc.xlei.fuckipv6.android.bridge.RelaySurface
+import cc.xlei.fuckipv6.android.ui.CoordinatorPageData
 import cc.xlei.fuckipv6.android.ui.RelayPageData
 import cc.xlei.fuckipv6.android.contract.SharedContractLoader
 import cc.xlei.fuckipv6.android.ui.ContractFailureScreen
@@ -62,12 +63,14 @@ class MainActivity : ComponentActivity() {
             val files = ready?.data
             val filesFailureKey = (bridgeState as? BridgeState.Failed)?.failure?.uiStateKey
             val relay = ready?.relay?.let(::relayPageData)
+            val coordinator = ready?.coordinator?.let(CoordinatorPageData::fromBridge)
             FuckIpv6Theme {
                 contracts.fold(
                     onSuccess = {
                         FuckIpv6App(
                             contracts = it,
                             relay = relay,
+                            coordinator = coordinator,
                             files = files,
                             filesFailureKey = filesFailureKey,
                         )

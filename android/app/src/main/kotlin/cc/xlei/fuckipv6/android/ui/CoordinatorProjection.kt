@@ -1,5 +1,8 @@
 package cc.xlei.fuckipv6.android.ui
 
+import cc.xlei.fuckipv6.android.bridge.CoordinatorCandidateView
+import cc.xlei.fuckipv6.android.bridge.CoordinatorSurface
+import cc.xlei.fuckipv6.android.bridge.CoordinatorTermView
 import cc.xlei.fuckipv6.contract.NodeContractV1.CoordinatorCandidateHealth
 import cc.xlei.fuckipv6.contract.NodeContractV1.CoordinatorCandidateStatus
 import cc.xlei.fuckipv6.contract.NodeContractV1.CoordinatorPhase
@@ -50,53 +53,81 @@ data class CoordinatorPageData(
         fun fromStatus(
             networkName: String,
             status: CoordinatorCandidateStatus?,
-        ): CoordinatorPageData {
-            val controlPlane = status?.control_plane
-            val stateKey = when (controlPlane?.state) {
+        ): CoordinatorPageData = fromBridge(
+            CoordinatorSurface(
+                networkName = networkName,
+                controlPlaneState = status?.control_plane?.state,
+                governanceWritable = status?.control_plane?.governance_writable == true,
+                reasonCode = status?.control_plane?.reason_code,
+                receivedVotes = status?.control_plane?.quorum?.received_votes ?: 0L,
+                requiredVotes = status?.control_plane?.quorum?.required_votes ?: 0L,
+                participantCount = status?.control_plane?.quorum?.participant_count ?: 0L,
+                currentLeader = status?.current_leader,
+                latestTerm = status?.latest_term?.let { term ->
+                    val number = term.term
+                    val token = term.fencing_token
+                    val leader = term.leader
+                    if (number == null || token == null || leader.isNullOrBlank()) {
+                        null
+                    } else {
+                        CoordinatorTermView(number, token, leader, term.phase?.wireName())
+                    }
+                },
+                candidates = status?.candidates.orEmpty().mapNotNull { candidate ->
+                    val nodeId = candidate.node_id?.takeIf(String::isNotBlank)
+                        ?: return@mapNotNull null
+                    CoordinatorCandidateView(
+                        nodeId = nodeId,
+                        priority = candidate.priority,
+                        health = (candidate.health ?: CoordinatorCandidateHealth.MISSING).wireName(),
+                        eligibleForElection = candidate.eligible_for_election == true,
+                        reasonCode = candidate.reason_code,
+                    )
+                },
+            ),
+        )
+
+        /** Bridge-level entry point: same semantics, plain models instead of DTOs. */
+        fun fromBridge(surface: CoordinatorSurface): CoordinatorPageData {
+            val stateKey = when (surface.controlPlaneState) {
                 "available" -> "runtime.control_plane.available"
                 null -> "runtime.control_plane.unobserved"
                 else -> "runtime.control_plane.limited"
             }
-            val candidates = status?.candidates.orEmpty().mapNotNull { candidate ->
-                val nodeId = candidate.node_id?.takeIf(String::isNotBlank)
-                    ?: return@mapNotNull null
-                val health = candidate.health ?: CoordinatorCandidateHealth.MISSING
+            val candidates = surface.candidates.map { candidate ->
                 CoordinatorCandidateProjection(
-                    nodeId = nodeId,
+                    nodeId = candidate.nodeId,
                     priority = candidate.priority,
-                    healthKey = "runtime.coordinator.health.${health.wireName()}",
-                    eligibleForElection = candidate.eligible_for_election == true,
-                    reasonCode = candidate.reason_code?.takeIf(String::isNotBlank)
+                    healthKey = "runtime.coordinator.health.${candidate.health ?: "missing"}",
+                    eligibleForElection = candidate.eligibleForElection,
+                    reasonCode = candidate.reasonCode?.takeIf(String::isNotBlank)
                         ?: "coordinator.candidate.health_unknown",
                 )
             }
-            val latestTerm = status?.latest_term?.let { term ->
-                val termNumber = term.term ?: return@let null
-                val fencingToken = term.fencing_token ?: return@let null
-                val leader = term.leader?.takeIf(String::isNotBlank) ?: return@let null
+            val latestTerm = surface.latestTerm?.let { term ->
                 CoordinatorTermProjection(
-                    term = termNumber,
-                    fencingToken = fencingToken,
-                    leader = leader,
+                    term = term.term,
+                    fencingToken = term.fencingToken,
+                    leader = term.leader,
                     phaseKey = coordinatorPhaseKey(term.phase),
                 )
             }
             return CoordinatorPageData(
-                networkName = networkName,
+                networkName = surface.networkName,
                 stateKey = stateKey,
-                governanceWritable = controlPlane?.governance_writable == true,
-                reasonCode = controlPlane?.reason_code?.takeIf(String::isNotBlank)
+                governanceWritable = surface.governanceWritable,
+                reasonCode = surface.reasonCode?.takeIf(String::isNotBlank)
                     ?: "coordinator.control_plane.unobserved",
-                receivedVotes = controlPlane?.quorum?.received_votes ?: 0L,
-                requiredVotes = controlPlane?.quorum?.required_votes ?: 0L,
-                participantCount = controlPlane?.quorum?.participant_count ?: 0L,
-                currentLeader = status?.current_leader?.takeIf(String::isNotBlank),
+                receivedVotes = surface.receivedVotes,
+                requiredVotes = surface.requiredVotes,
+                participantCount = surface.participantCount,
+                currentLeader = surface.currentLeader?.takeIf(String::isNotBlank),
                 latestTerm = latestTerm,
                 candidates = candidates,
             )
         }
 
-        private fun coordinatorPhaseKey(phase: CoordinatorPhase?): String =
-            "runtime.coordinator.phase.${phase?.wireName() ?: "unknown"}"
+        private fun coordinatorPhaseKey(phase: String?): String =
+            "runtime.coordinator.phase.${phase ?: "unknown"}"
     }
 }

@@ -24,6 +24,7 @@ sealed interface BridgeState {
         val data: FilePageData,
         val snapshotRevision: Long?,
         val relay: RelaySurface? = null,
+        val coordinator: CoordinatorSurface? = null,
     ) : BridgeState
     data class Failed(val failure: BridgeFailure) : BridgeState
 
@@ -67,6 +68,7 @@ class NodeBridge(
                 data = result.view.file.toPageData(),
                 snapshotRevision = result.view.file.snapshotRevision,
                 relay = result.view.relay,
+                coordinator = result.view.coordinator,
             )
             is SnapshotResult.Failed -> BridgeState.Failed(result.failure)
         }

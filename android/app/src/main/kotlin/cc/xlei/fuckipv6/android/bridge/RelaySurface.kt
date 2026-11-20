@@ -24,4 +24,5 @@ data class RelaySurface(
 data class ParsedSnapshot(
     val file: SnapshotFileView,
     val relay: RelaySurface?,
+    val coordinator: CoordinatorSurface? = null,
 )

@@ -4192,6 +4192,14 @@ debug 测试构建；命令为
 4 项，Android 单测共 45 项通过，`:app:lintDebug`、`:app:assembleDebug` 通过。AdminRecovery/成员/策略等页面仍需各自的
 快照切片映射，W16-01 保持 `[ ]`。
 
+**补充（2026-11-20，Coordinator 页接入快照）**：新增 `bridge/CoordinatorSurface` 与 `coordinatorSurface()`，从
+`embedded_services[].coordinator_candidates` 读取控制面状态、`governance_writable`、`reason_code`、quorum 计数、当前
+Leader、最近任期与候选健康；缺失控制面保持 `null` 并由页面显示 `runtime.control_plane.unobserved`，不完整的任期
+（缺 term/token/leader）与没有 `node_id` 的候选整条丢弃。`CoordinatorPageData.fromBridge(surface)` 与既有
+`.fromStatus(...)`（桌面 DTO 路径）共用同一映射，避免两条入口语义漂移。新增 `CoordinatorSnapshotParseTest` 5 项，
+Android 单测共 50 项通过，`:app:lintDebug`、`:app:assembleDebug` 通过。AdminRecovery 页仍需 `admin_recovery_list`
+命令结果解析，W16-01 保持 `[ ]`。
+
 ### W16-02 前台 VpnService 生命周期 `[ ]`
 
 - [ ] 使用前台服务承载 VpnService 和数据面；

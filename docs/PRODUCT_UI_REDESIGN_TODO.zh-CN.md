@@ -4283,6 +4283,11 @@ generation 守卫丢弃过期目录响应，避免切目录后迟到的分页覆
 只有“流完整 + close 成功”才报告 `Saved`；传输失败、超限、close/open 失败一律 `discard`，绝不出现“已保存字节”。
 新增 `DownloadSaverTest` 5 项，Android 单测共 102 项通过。SAF 选择器实现、上传源选择与 UI 挂载仍待完成，W16-01 保持 `[ ]`。
 
+**补充（2026-11-21，File 浏览面板）**：新增 `ui/FileBrowseContent`，只渲染节点实际返回的目标、当前 portable 路径与条目
+（目录/文件与字节数），面包屑复用 `file.page.root`/`file.page.up`，空目录、加载中、截断、加载更多与错误各有独立状态，
+不伪造条目、大小或“根”；上传/下载/保存只通过宿主回调触发。复用既有 `file.page.*` 文案。Android 单测 102 项通过，
+`:app:lintDebug`、`:app:assembleDebug` 通过。面板挂载仍等待外壳文件合入，W16-01 保持 `[ ]`。
+
 ### W16-02 前台 VpnService 生命周期 `[ ]`
 
 - [ ] 使用前台服务承载 VpnService 和数据面；

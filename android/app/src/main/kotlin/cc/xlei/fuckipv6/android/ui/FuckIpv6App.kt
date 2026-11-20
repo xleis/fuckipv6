@@ -246,6 +246,7 @@ fun PageContent(
                         onUp = fileBrowseActions.up,
                         onLoadMore = fileBrowseActions.loadMore,
                         onRefresh = fileBrowseActions.refresh,
+                        actions = fileBrowseActions,
                     )
                     transfers?.let {
                         FileTransferSummary(

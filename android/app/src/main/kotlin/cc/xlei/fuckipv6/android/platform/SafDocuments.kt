@@ -2,6 +2,7 @@ package cc.xlei.fuckipv6.android.platform
 
 import android.content.ContentResolver
 import android.net.Uri
+import android.provider.OpenableColumns
 import cc.xlei.fuckipv6.android.ui.DownloadSink
 import java.io.InputStream
 import java.io.OutputStream
@@ -49,6 +50,23 @@ class SafDownloadSink(
  */
 fun ContentResolver.openUploadSource(uri: Uri): InputStream =
     openInputStream(uri) ?: error("cannot open the selected document for reading")
+
+/**
+ * Display name the provider reports for the picked document, or null when it
+ * exposes none. Callers must not fall back to the raw URI path: that is a
+ * provider-internal identifier, not a file name.
+ */
+fun ContentResolver.displayName(uri: Uri): String? =
+    runCatching {
+        query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (!cursor.moveToFirst()) {
+                null
+            } else {
+                val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (index < 0) null else cursor.getString(index)
+            }
+        }
+    }.getOrNull()?.takeIf { it.isNotBlank() }
 
 /**
  * Best-effort byte count for the picked document, so uploads can send a fixed

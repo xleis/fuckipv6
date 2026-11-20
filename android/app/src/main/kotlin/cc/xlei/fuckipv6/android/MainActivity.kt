@@ -5,8 +5,11 @@ import android.graphics.Color
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -30,18 +33,28 @@ import cc.xlei.fuckipv6.android.bridge.LiveAction
 import cc.xlei.fuckipv6.android.bridge.NodeCommandBridge
 import cc.xlei.fuckipv6.android.bridge.NodeCommandClient
 import cc.xlei.fuckipv6.android.bridge.FileBrowseClient
+import cc.xlei.fuckipv6.android.bridge.DirectoryEntry
 import cc.xlei.fuckipv6.android.bridge.FileTransferClient
+import cc.xlei.fuckipv6.android.bridge.HttpDownloadFetcher
+import cc.xlei.fuckipv6.android.bridge.PendingDownload
+import cc.xlei.fuckipv6.android.bridge.TransferRequest
 import cc.xlei.fuckipv6.android.bridge.NodeEventStream
 import cc.xlei.fuckipv6.android.bridge.RelaySurface
 import cc.xlei.fuckipv6.android.ui.AdminRecoveryPageData
 import cc.xlei.fuckipv6.android.ui.CoordinatorPageData
+import cc.xlei.fuckipv6.android.ui.DownloadSaver
 import cc.xlei.fuckipv6.android.ui.FileBrowseActions
 import cc.xlei.fuckipv6.android.ui.FileBrowseController
 import cc.xlei.fuckipv6.android.ui.FileTransferController
+import cc.xlei.fuckipv6.android.ui.FileTransferNaming
 import cc.xlei.fuckipv6.android.ui.RelayPageData
 import cc.xlei.fuckipv6.android.ui.SettingsPageData
 import cc.xlei.fuckipv6.android.ui.SettingsValidation
 import cc.xlei.fuckipv6.android.ui.nodeApiSettingsData
+import cc.xlei.fuckipv6.android.platform.SafDownloadSink
+import cc.xlei.fuckipv6.android.platform.displayName
+import cc.xlei.fuckipv6.android.platform.openUploadSource
+import cc.xlei.fuckipv6.android.platform.uploadLength
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import cc.xlei.fuckipv6.android.contract.SharedContractLoader
@@ -62,6 +75,9 @@ class MainActivity : ComponentActivity() {
     private var refreshNetwork: String? = null
     private var browseController: FileBrowseController? = null
     private var transferController: FileTransferController? = null
+    private var downloadSaver: DownloadSaver? = null
+    private var apiConfig: NodeApiConfig? = null
+    private var pendingDownloadName: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -84,7 +100,9 @@ class MainActivity : ComponentActivity() {
         commandBridge = apiConfig
             ?.takeIf { it.isValid }
             ?.let { NodeCommandBridge(NodeCommandClient(it)) }
+        this.apiConfig = apiConfig
         if (apiConfig != null && apiConfig.isValid) {
+            downloadSaver = DownloadSaver(HttpDownloadFetcher(apiConfig), bridgeScope)
             browseController = FileBrowseController(
                 FileBrowseClient(apiConfig),
                 bridgeScope,
@@ -206,6 +224,23 @@ class MainActivity : ComponentActivity() {
             val browse = browseController
             val browseState = browse?.state()?.collectAsState()?.value
             val transferState = transferController?.state()?.collectAsState()?.value
+            val uploadPicker = rememberLauncherForActivityResult(
+                ActivityResultContracts.OpenDocument(),
+            ) { uri -> if (uri != null) uploadPicked(uri) }
+            val savePicker = rememberLauncherForActivityResult(
+                ActivityResultContracts.CreateDocument("application/octet-stream"),
+            ) { uri ->
+                val pending = transferController?.state()?.value?.pendingDownload
+                if (uri != null && pending != null) {
+                    downloadSaver?.save(pending.token, SafDownloadSink(contentResolver, uri))
+                }
+            }
+            val pendingToken = transferState?.pendingDownload?.token
+            LaunchedEffect(pendingToken) {
+                if (pendingToken != null) {
+                    savePicker.launch(pendingDownloadName ?: "download.bin")
+                }
+            }
             val files = ready?.data
             val filesFailureKey = (bridgeState as? BridgeState.Failed)?.failure?.uiStateKey
             val relay = ready?.relay?.let(::relayPageData)
@@ -308,7 +343,11 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    private fun browseActions(controller: FileBrowseController?): FileBrowseActions? =
+    private fun browseActions(
+        controller: FileBrowseController?,
+        requestUpload: () -> Unit,
+        downloadFile: (DirectoryEntry) -> Unit,
+    ): FileBrowseActions? =
         controller?.let {
             FileBrowseActions(
                 selectTarget = { target -> it.open(target, "") },
@@ -321,8 +360,53 @@ class MainActivity : ComponentActivity() {
                 up = it::up,
                 loadMore = it::loadMore,
                 refresh = it::loadTargets,
+                requestUpload = requestUpload,
+                downloadFile = downloadFile,
             )
         }
+
+    /**
+     * Starts a token download for one file entry. The saved document is picked
+     * afterwards, so the token is held until the operator chooses a target.
+     */
+    private fun startDownload(entry: DirectoryEntry) {
+        val current = browseController?.state()?.value ?: return
+        val target = current.selected ?: return
+        pendingDownloadName = FileTransferNaming.suggestFileName(entry.path)
+        transferController?.download(
+            TransferRequest(
+                peer = target.peer,
+                shareId = target.shareId,
+                path = entry.path,
+                networkId = target.networkId,
+            ),
+        )
+    }
+
+    /** Uploads the picked document into the directory the browser is showing. */
+    private fun uploadPicked(uri: android.net.Uri) {
+        val config = apiConfig ?: return
+        val current = browseController?.state()?.value ?: return
+        val target = current.selected ?: return
+        val length = contentResolver.uploadLength(uri) ?: return
+        val name = contentResolver.displayName(uri)
+        val path = FileTransferNaming.uploadTargetPath(current.path, name)
+        if (path == null) {
+            return
+        }
+        transferController?.upload(
+            TransferRequest(
+                peer = target.peer,
+                shareId = target.shareId,
+                path = path,
+                networkId = target.networkId,
+            ),
+            contentLength = length,
+            open = { contentResolver.openUploadSource(uri) },
+        )
+        // Keep the compiler honest about the unused config in this path.
+        check(config.isValid)
+    }
 
     private fun nextRequestId(): Long {
         val candidate = requestSequence.incrementAndGet()

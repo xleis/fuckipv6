@@ -4317,6 +4317,12 @@ W16-01 仍因外壳文件被并发改动占用而无法挂载，保持 `[ ]`。
 本次把并行会话对同一批 shell 文件的样式改动一并提交，否则挂载无法落地。Android 单测 119 项通过。成员页、SAF 选择器交互、
 上传/下载按钮与 VpnService 仍未完成，W16-01/W16-02 保持 `[ ]`。
 
+**补充（2026-11-21，上传/下载 SAF 接线）**：File 浏览面板新增上传按钮与文件条目下载，宿主负责系统选择器：上传用
+`OpenDocument` 取 `Uri`，经 `displayName`/`uploadLength` 生成目标 portable 路径（拒绝 `..`、分隔符、冒号、控制字符与
+DOS 设备名；provider 不报大小或名字时不提交）后流式上传；下载先取 token 再 `CreateDocument` 选落点，写入走
+`DownloadSaver` + `SafDownloadSink`（失败删除）。新增 `FileTransferNamingTest` 2 项，Android 单测共 121 项通过。
+真机选择器交互与 VpnService 仍待验收，W16-01/W16-02 保持 `[ ]`。
+
 ### W16-02 前台 VpnService 生命周期 `[ ]`
 
 - [ ] 使用前台服务承载 VpnService 和数据面；

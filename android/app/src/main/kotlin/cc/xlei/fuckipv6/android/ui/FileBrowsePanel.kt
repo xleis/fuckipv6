@@ -28,6 +28,10 @@ data class FileBrowseActions(
     val up: () -> Unit,
     val loadMore: () -> Unit,
     val refresh: () -> Unit,
+    /** Opens the system upload picker; the host owns the launcher. */
+    val requestUpload: () -> Unit,
+    /** Starts a token download for one file entry; the host owns the save picker. */
+    val downloadFile: (DirectoryEntry) -> Unit,
 )
 
 /**
@@ -48,6 +52,7 @@ fun FileBrowseContent(
     onUp: () -> Unit,
     onLoadMore: () -> Unit,
     onRefresh: () -> Unit,
+    actions: FileBrowseActions,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Card(
@@ -91,11 +96,20 @@ fun FileBrowseContent(
                         }
                     }
                 }
-                TextButton(
-                    modifier = Modifier.testTag("file-browse-refresh"),
-                    onClick = onRefresh,
-                ) {
-                    Text(contracts.i18n.translate(locale, "file.page.refresh"))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(
+                        modifier = Modifier.testTag("file-browse-refresh"),
+                        onClick = onRefresh,
+                    ) {
+                        Text(contracts.i18n.translate(locale, "file.page.refresh"))
+                    }
+                    TextButton(
+                        modifier = Modifier.testTag("file-browse-upload"),
+                        enabled = state.selected != null && !state.loading,
+                        onClick = actions.requestUpload,
+                    ) {
+                        Text(contracts.i18n.translate(locale, "file.page.upload"))
+                    }
                 }
             }
         }
@@ -159,7 +173,9 @@ fun FileBrowseContent(
                     val name = entry.path.substringAfterLast('/')
                     TextButton(
                         modifier = Modifier.testTag("file-entry-${entry.path}"),
-                        onClick = { onOpenEntry(entry) },
+                        onClick = {
+                            if (entry.isDirectory) onOpenEntry(entry) else actions.downloadFile(entry)
+                        },
                     ) {
                         Text(
                             text = if (entry.isDirectory) {

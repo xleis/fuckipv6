@@ -223,7 +223,11 @@ data class AdminRecoveryPageData(
             networkId: String?,
             recoveries: List<RecoveryStatusView>,
             loadedAtUnixMs: Long? = null,
+            onSubmit: ((NodeSubmitAdminRecoveryCommand) -> Unit)? = null,
+            onGetStatus: ((NodeAdminRecoveryStatusCommand) -> Unit)? = null,
             onList: ((NodeAdminRecoveryListCommand) -> Unit)? = null,
+            onRevoke: ((NodeRevokeAdminRecoveryCommand) -> Unit)? = null,
+            onExecute: ((NodeExecuteAdminRecoveryCommand) -> Unit)? = null,
         ): AdminRecoveryPageData = AdminRecoveryPageData(
             networkName = networkName,
             networkId = networkId,
@@ -231,7 +235,11 @@ data class AdminRecoveryPageData(
             latestStatus = recoveries.firstOrNull()?.let(AdminRecoveryStatusProjection::from),
             recoveries = recoveries.map(AdminRecoveryStatusProjection::from),
             loadedAtUnixMs = loadedAtUnixMs,
+            onSubmit = onSubmit,
+            onGetStatus = onGetStatus,
             onList = onList,
+            onRevoke = onRevoke,
+            onExecute = onExecute,
         )
     }
 }

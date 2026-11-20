@@ -1,5 +1,6 @@
 package cc.xlei.fuckipv6.android.bridge
 
+import cc.xlei.fuckipv6.contract.NodeContractV1.AdminRecoveryRequest
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -47,6 +48,109 @@ object AdminRecoverySurface {
     fun listCommand(networkName: String): JSONObject = JSONObject()
         .put("command", "list_admin_recoveries")
         .put("payload", JSONObject().put("network_name", networkName))
+
+    fun statusCommand(networkName: String, requestId: String): JSONObject = JSONObject()
+        .put("command", "get_admin_recovery_status")
+        .put(
+            "payload",
+            JSONObject()
+                .put("network_name", networkName)
+                .put("request_id", requestId),
+        )
+
+    fun revokeCommand(networkName: String, requestId: String, reason: String): JSONObject = JSONObject()
+        .put("command", "revoke_admin_recovery")
+        .put(
+            "payload",
+            JSONObject()
+                .put("network_name", networkName)
+                .put("request_id", requestId)
+                .put("reason", reason),
+        )
+
+    fun executeCommand(networkName: String, requestId: String): JSONObject = JSONObject()
+        .put("command", "execute_admin_recovery")
+        .put(
+            "payload",
+            JSONObject()
+                .put("network_name", networkName)
+                .put("request_id", requestId),
+        )
+
+    /**
+     * Submits the exact signed bundle the operator assembled offline. The
+     * request id, snapshot digest and approvals are carried verbatim so the
+     * coordinator re-validates the same bytes it would see from a desktop.
+     */
+    fun submitCommand(networkName: String, request: AdminRecoveryRequest): JSONObject = JSONObject()
+        .put("command", "submit_admin_recovery")
+        .put(
+            "payload",
+            JSONObject()
+                .put("network_name", networkName)
+                .put("request", encodeRequest(request)),
+        )
+
+    fun encodeRequest(request: AdminRecoveryRequest): JSONObject {
+        val proposal = request.proposal
+        val snapshot = proposal.snapshot
+        val target = proposal.target
+        val revocation = proposal.revocation
+        val approvals = JSONArray()
+        request.approvals.orEmpty().forEach { approval ->
+            approvals.put(
+                JSONObject()
+                    .put("signer", approval.signer)
+                    .put("signer_public_key", approval.signer_public_key)
+                    .put("signed_at_unix_ms", approval.signed_at_unix_ms)
+                    .put("signature", approval.signature),
+            )
+        }
+        return JSONObject()
+            .put(
+                "proposal",
+                JSONObject()
+                    .put("schema_version", proposal.schema_version)
+                    .put("request_id", proposal.request_id)
+                    .put("network_id", proposal.network_id)
+                    .put(
+                        "snapshot",
+                        JSONObject()
+                            .put("owner", snapshot.owner)
+                            .put("administrators", JSONArray(snapshot.administrators.orEmpty()))
+                            .put("members", JSONArray(snapshot.members.orEmpty()))
+                            .put("network_revision", snapshot.network_revision)
+                            .put("roster_digest", snapshot.roster_digest),
+                    )
+                    .put(
+                        "target",
+                        JSONObject()
+                            .put("owner", target.owner)
+                            .put("administrators", JSONArray(target.administrators.orEmpty()))
+                            .put("members", JSONArray(target.members.orEmpty())),
+                    )
+                    .put("initiated_by", proposal.initiated_by)
+                    .put("reason", proposal.reason.wireName())
+                    .put("nonce", proposal.nonce)
+                    .put("issued_at_unix_ms", proposal.issued_at_unix_ms)
+                    .put("expires_at_unix_ms", proposal.expires_at_unix_ms)
+                    .put(
+                        "revocation",
+                        JSONObject()
+                            .put("old_sessions", revocation.old_sessions)
+                            .put("pending_invitations", revocation.pending_invitations)
+                            .put("unconfirmed_writes", revocation.unconfirmed_writes),
+                    ),
+            )
+            .put("approvals", approvals)
+    }
+
+    /** Single status payload returned by submit/status/revoke/execute. */
+    fun parseSingle(data: JSONObject?): RecoveryStatusView? {
+        if (data == null) return null
+        val source = if (data.has("request_id")) data else data.optJSONObject("status")
+        return source?.let(::status)
+    }
 
     /**
      * Parses the `admin_recoveries` outcome. The node returns an array; the

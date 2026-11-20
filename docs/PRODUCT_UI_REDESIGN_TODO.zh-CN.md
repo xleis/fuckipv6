@@ -4220,6 +4220,15 @@ Android 单测共 50 项通过，`:app:lintDebug`、`:app:assembleDebug` 通过�
 `MainActivity` 用独立命令桥按网络名刷新列表。新增 `AdminRecoverySurfaceTest` 5 项，Android 单测共 55 项通过。
 W16-01 仍缺提交/撤销/执行与成员、策略等页面切片，保持 `[ ]`。
 
+**补充（2026-11-20，管理员恢复动作接线）**：`bridge/AdminRecoverySurface` 补齐 `submit_admin_recovery`
+（完整签名 bundle 的 `request` 编码）、`get_admin_recovery_status`、`revoke_admin_recovery`、`execute_admin_recovery`
+与 `parseSingle(...)`；`encodeRequest` 逐字段还原 `proposal{snapshot,target,revocation}` 与 `approvals`，键名与既有
+`AdminRecoveryRequestCodec` 解析器一致并由往返测试锁定。`AdminRecoveryPageData.fromBridge(...)` 接线提交/状态/列表/
+撤销/执行五个动作，缺任一回调时对应按钮保持禁用；`MainActivity` 用独立命令桥提交，`admin_recovery_status` 结果并入
+列表并按网络刷新，`admin_recoveries` 结果整体替换。Android 单测共 57 项通过（新增 bundle 往返与命令形状 2 项），
+`:app:lintDebug`、`:app:assembleDebug` 通过。该验证在与并发 UI 改动隔离的 HEAD worktree 中执行。W16-01 仍缺成员/策略
+页面切片与 VpnService，保持 `[ ]`。
+
 ### W16-02 前台 VpnService 生命周期 `[ ]`
 
 - [ ] 使用前台服务承载 VpnService 和数据面；

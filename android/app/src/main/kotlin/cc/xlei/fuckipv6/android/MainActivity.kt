@@ -69,10 +69,18 @@ class MainActivity : ComponentActivity() {
             ?.also { adminBridge ->
                 bridgeScope.launch {
                     adminBridge.lastOutcome().collect { outcome ->
-                        if (outcome is CommandOutcome.Succeeded &&
-                            outcome.outcomeStatus == "admin_recoveries"
-                        ) {
-                            recoveries.value = AdminRecoverySurface.parseList(outcome.data)
+                        if (outcome !is CommandOutcome.Succeeded) return@collect
+                        when (outcome.outcomeStatus) {
+                            "admin_recoveries" -> recoveries.value =
+                                AdminRecoverySurface.parseList(outcome.data)
+                            "admin_recovery_status" -> {
+                                val status = AdminRecoverySurface.parseSingle(outcome.data)
+                                if (status != null) {
+                                    recoveries.value = listOf(status) + recoveries.value
+                                        .filterNot { it.requestId == status.requestId }
+                                    refreshNetwork?.let(::refreshRecoveries)
+                                }
+                            }
                         }
                     }
                 }
@@ -89,7 +97,40 @@ class MainActivity : ComponentActivity() {
                         networkName = networkName,
                         networkId = networkId,
                         recoveries = recoveries.value,
-                        onList = { refreshRecoveries(networkName) },
+                        onSubmit = { command ->
+                            submitRecovery(
+                                AdminRecoverySurface.submitCommand(
+                                    command.network_name,
+                                    command.request,
+                                ),
+                            )
+                        },
+                        onGetStatus = { command ->
+                            submitRecovery(
+                                AdminRecoverySurface.statusCommand(
+                                    command.network_name,
+                                    command.request_id,
+                                ),
+                            )
+                        },
+                        onList = { command -> submitRecovery(AdminRecoverySurface.listCommand(command.network_name)) },
+                        onRevoke = { command ->
+                            submitRecovery(
+                                AdminRecoverySurface.revokeCommand(
+                                    command.network_name,
+                                    command.request_id,
+                                    command.reason,
+                                ),
+                            )
+                        },
+                        onExecute = { command ->
+                            submitRecovery(
+                                AdminRecoverySurface.executeCommand(
+                                    command.network_name,
+                                    command.request_id,
+                                ),
+                            )
+                        },
                     )
                     if (refreshNetwork != networkName) {
                         refreshNetwork = networkName
@@ -160,14 +201,23 @@ class MainActivity : ComponentActivity() {
         },
     )
 
-    /** Refresh the recovery list through the read-only command channel. */
+    /** Refresh the recovery list through the recovery command bridge. */
     private fun refreshRecoveries(networkName: String) {
+        submitRecovery(AdminRecoverySurface.listCommand(networkName), networkName)
+    }
+
+    /**
+     * One command at a time on the recovery bridge. The idempotency key keeps a
+     * retried submit from executing twice; the UI never infers success — the
+     * operation has to report a terminal stage.
+     */
+    private fun submitRecovery(command: org.json.JSONObject, label: String? = null) {
         val bridge = recoveryBridge ?: return
-        val command = AdminRecoverySurface.listCommand(networkName)
+        val kind = command.optString("command", "admin_recovery")
         val body = CommandJson.envelope(
             command = command,
             requestId = nextRequestId(),
-            idempotencyKey = "recovery-list-${networkName}-${UUID.randomUUID()}",
+            idempotencyKey = "$kind-${label ?: refreshNetwork ?: "-"}-${UUID.randomUUID()}",
         )
         bridge.submit(bridgeScope, body)
     }

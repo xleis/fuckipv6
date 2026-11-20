@@ -1,6 +1,7 @@
 package cc.xlei.fuckipv6.android.bridge
 
 import cc.xlei.fuckipv6.android.ui.AdminRecoveryPageData
+import cc.xlei.fuckipv6.android.ui.AdminRecoveryRequestCodec
 import cc.xlei.fuckipv6.android.ui.AdminRecoveryStatusProjection
 import cc.xlei.fuckipv6.contract.NodeContractV1.AdminRecoveryState
 import org.json.JSONObject
@@ -93,5 +94,92 @@ class AdminRecoverySurfaceTest {
 
         val withoutChannel = AdminRecoveryPageData.fromBridge("家庭网络", "net-1", views)
         assertFalse(withoutChannel.backendAvailable)
+    }
+    @Test
+    fun submittedBundleRoundTripsThroughTheDocumentedKeys() {
+        val requestId = "recovery_" + java.util.Base64.getUrlEncoder().withoutPadding()
+            .encodeToString(ByteArray(32) { index -> index.toByte() })
+        val raw = """
+        {
+          "proposal": {
+            "schema_version": 1,
+            "request_id": "$requestId",
+            "network_id": "net-1",
+            "snapshot": {
+              "owner": "node-owner-a",
+              "administrators": ["node-a"],
+              "members": ["node-a", "node-b"],
+              "network_revision": 7,
+              "roster_digest": "digest-7"
+            },
+            "target": {
+              "owner": "node-owner-b",
+              "administrators": [],
+              "members": ["node-b"]
+            },
+            "initiated_by": "node-owner-a",
+            "reason": "disaster_recovery",
+            "nonce": "nonce-1",
+            "issued_at_unix_ms": 1760000000000,
+            "expires_at_unix_ms": 1760000600000,
+            "revocation": {
+              "old_sessions": true,
+              "pending_invitations": true,
+              "unconfirmed_writes": false
+            }
+          },
+          "approvals": [
+            {
+              "signer": "trustee-1",
+              "signer_public_key": "cHVibGljLWtleS0x",
+              "signed_at_unix_ms": 1760000001000,
+              "signature": "c2lnbmF0dXJlLTE"
+            }
+          ]
+        }
+        """.trimIndent()
+        val parsed = AdminRecoveryRequestCodec.parse(raw)
+        val encoded = AdminRecoverySurface.encodeRequest(parsed)
+        val reparsed = AdminRecoveryRequestCodec.parse(encoded.toString())
+        assertEquals(parsed.proposal.request_id, reparsed.proposal.request_id)
+        assertEquals(parsed.proposal.nonce, reparsed.proposal.nonce)
+        assertEquals(parsed.proposal.target.owner, reparsed.proposal.target.owner)
+        assertEquals(
+            parsed.proposal.snapshot.network_revision,
+            reparsed.proposal.snapshot.network_revision,
+        )
+        assertEquals(parsed.approvals.size, reparsed.approvals.size)
+        assertEquals(parsed.approvals[0].signature, reparsed.approvals[0].signature)
+        assertEquals(
+            parsed.proposal.revocation.unconfirmed_writes,
+            reparsed.proposal.revocation.unconfirmed_writes,
+        )
+
+        val command = AdminRecoverySurface.submitCommand("家庭网络", parsed)
+        assertEquals("submit_admin_recovery", command.getString("command"))
+        assertEquals("家庭网络", command.getJSONObject("payload").getString("network_name"))
+        assertTrue(command.getJSONObject("payload").getJSONObject("request").has("proposal"))
+        assertTrue(command.getJSONObject("payload").getJSONObject("request").has("approvals"))
+    }
+
+    @Test
+    fun statusRevokeAndExecuteCommandsCarryOnlyDocumentedFields() {
+        val status = AdminRecoverySurface.statusCommand("n", "req-1")
+        assertEquals("get_admin_recovery_status", status.getString("command"))
+        assertEquals(
+            setOf("network_name", "request_id"),
+            status.getJSONObject("payload").keys().asSequence().toSet(),
+        )
+
+        val revoke = AdminRecoverySurface.revokeCommand("n", "req-1", "operator request")
+        assertEquals("revoke_admin_recovery", revoke.getString("command"))
+        assertEquals("operator request", revoke.getJSONObject("payload").getString("reason"))
+
+        val execute = AdminRecoverySurface.executeCommand("n", "req-1")
+        assertEquals("execute_admin_recovery", execute.getString("command"))
+        assertEquals(
+            setOf("network_name", "request_id"),
+            execute.getJSONObject("payload").keys().asSequence().toSet(),
+        )
     }
 }

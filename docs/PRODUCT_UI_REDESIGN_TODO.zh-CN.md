@@ -4300,6 +4300,11 @@ File/Relay/Coordinator/AdminRecovery；AdminRecovery 的网络名/id 只取快�
 [W16_ANDROID_SURFACE_MOUNT.zh-CN.md](W16_ANDROID_SURFACE_MOUNT.zh-CN.md)；因 `FuckIpv6App`/`MainActivity` 仍带其他会话
 未提交改动，挂载提交需等待文件回稳，W16-01 保持 `[ ]`。
 
+**补充（2026-11-21，事件流断点续传）**：事件帧解析 `cursor.sequence`/`snapshot_revision` 并生成节点约定的
+`sequence:snapshot_revision` 续传令牌；`NodeEventStream` 重连时同时发送 `?after=` 与 `Last-Event-ID`，非法令牌被丢弃
+（否则节点 400、流无法启动）。新增两项回归，Android 单测共 110 项通过。W16-01 仍因外壳文件被并发改动占用而无法挂载，
+保持 `[ ]`。
+
 ### W16-02 前台 VpnService 生命周期 `[ ]`
 
 - [ ] 使用前台服务承载 VpnService 和数据面；

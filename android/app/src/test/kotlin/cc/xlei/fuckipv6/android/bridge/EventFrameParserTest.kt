@@ -2,6 +2,7 @@ package cc.xlei.fuckipv6.android.bridge
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -61,5 +62,47 @@ class EventFrameParserTest {
         val frame = EventFrameParser.parse("""data: {"type":"event","event":{"kind":"future"}}""")!!
         assertEquals("event", frame.type)
         assertTrue(frame.action() is LiveAction.RefreshSnapshot)
+    }
+
+    @Test
+    fun resumeTokensFollowTheNodeCursorFormat() {
+        val frame = EventFrameParser.parse(
+            """data: {"type":"snapshot","cursor":{"sequence":7,"snapshot_revision":12},"snapshot":{}}""",
+        )!!
+        assertEquals(7L, frame.sequence)
+        assertEquals(12L, frame.snapshotRevision)
+        assertEquals("7:12", frame.resumeToken())
+
+        val bare = EventFrameParser.parse(
+            """data: {"type":"event","cursor":{"sequence":9},"event":{"kind":"peer"}}""",
+        )!!
+        assertEquals("9", bare.resumeToken())
+
+        val noCursor = EventFrameParser.parse("""data: {"type":"event","event":{"kind":"peer"}}""")!!
+        assertNull(noCursor.resumeToken())
+    }
+
+    @Test
+    fun resumeUrlDropsMalformedTokensInsteadOfFailingTheStream() {
+        val config = NodeApiConfig("http://127.0.0.1:6668")
+        assertEquals(
+            "http://127.0.0.1:6668/api/v1/events",
+            NodeEventStream.eventsUrl(config, null),
+        )
+        assertEquals(
+            "http://127.0.0.1:6668/api/v1/events?after=7%3A12",
+            NodeEventStream.eventsUrl(config, "7:12"),
+        )
+        assertEquals(
+            "http://127.0.0.1:6668/api/v1/events",
+            NodeEventStream.eventsUrl(config, "not-a-cursor"),
+        )
+        assertEquals(
+            "http://127.0.0.1:6668/api/v1/events",
+            NodeEventStream.eventsUrl(config, "1:2:3"),
+        )
+        assertTrue(NodeEventStream.isValidCursor("42"))
+        assertFalse(NodeEventStream.isValidCursor("42:"))
+        assertFalse(NodeEventStream.isValidCursor(":-1"))
     }
 }

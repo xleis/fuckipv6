@@ -15,12 +15,13 @@ import java.net.URL
 class NodeEventStream(
     private val config: NodeApiConfig,
     private val timeoutMillis: Int = 10_000,
+    private val resumeCursor: String? = null,
 ) {
     /** Reads frames until the stream closes; returns the reason for stopping. */
     fun read(onFrame: (NodeEventFrame) -> Unit): BridgeFailure? {
         config.validationError()?.let { return BridgeFailure.Misconfigured }
         val connection = try {
-            URL(config.baseUrl.trimEnd('/') + EVENTS_PATH).openConnection() as HttpURLConnection
+            URL(eventsUrl(config, resumeCursor)).openConnection() as HttpURLConnection
         } catch (_: IOException) {
             return BridgeFailure.Unreachable
         } catch (_: IllegalArgumentException) {
@@ -34,6 +35,9 @@ class NodeEventStream(
             connection.readTimeout = 0
             connection.instanceFollowRedirects = false
             connection.setRequestProperty("Accept", "text/event-stream")
+            resumeCursor?.takeIf { it.isNotBlank() }?.let {
+                connection.setRequestProperty("Last-Event-ID", it)
+            }
             config.token?.takeIf { it.isNotBlank() }?.let {
                 connection.setRequestProperty("Authorization", "Bearer $it")
             }
@@ -59,5 +63,24 @@ class NodeEventStream(
 
     companion object {
         const val EVENTS_PATH = "/api/v1/events"
+
+        /**
+         * Resume URL. The node accepts the same token as `?after=` and as the
+         * `Last-Event-ID` header; sending both keeps reconnects consistent with
+         * SSE proxies that drop one of them. A malformed token is dropped rather
+         * than sent: the node would answer 400 and the stream would never start.
+         */
+        fun eventsUrl(config: NodeApiConfig, resumeCursor: String?): String {
+            val base = config.baseUrl.trimEnd('/') + EVENTS_PATH
+            val token = resumeCursor?.trim()?.takeIf { it.isNotEmpty() && isValidCursor(it) }
+                ?: return base
+            return base + "?after=" + java.net.URLEncoder.encode(token, "UTF-8")
+        }
+
+        fun isValidCursor(token: String): Boolean {
+            val parts = token.split(':')
+            if (parts.size > 2) return false
+            return parts.all { part -> part.isNotEmpty() && part.all(Char::isDigit) }
+        }
     }
 }

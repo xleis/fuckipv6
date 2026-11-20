@@ -4288,6 +4288,11 @@ generation 守卫丢弃过期目录响应，避免切目录后迟到的分页覆
 不伪造条目、大小或“根”；上传/下载/保存只通过宿主回调触发。复用既有 `file.page.*` 文案。Android 单测 102 项通过，
 `:app:lintDebug`、`:app:assembleDebug` 通过。面板挂载仍等待外壳文件合入，W16-01 保持 `[ ]`。
 
+**补充（2026-11-21，SAF 适配器）**：新增 `platform/SafDocuments`：下载落点只能是被系统选择器挑中的文档（`wt` 模式写入），
+失败时关闭并尽力删除，避免留下会被误当完整文件的残余；上传提供 `openUploadSource` 与仅在 provider 报告时才使用的
+`uploadLength`（不猜大小）。App 仍不直接写主机路径。`:app:lintDebug`、`:app:assembleDebug` 通过；真机选择器接线与设备验收
+仍属 W16，W16-01 保持 `[ ]`。
+
 ### W16-02 前台 VpnService 生命周期 `[ ]`
 
 - [ ] 使用前台服务承载 VpnService 和数据面；

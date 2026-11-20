@@ -127,9 +127,27 @@ cleanup() {
     info "evidence retained at $WORK"
 }
 
+# Local IPC clients must run inside the same network namespace as the node that
+# owns the socket: the service rejects cross-namespace peers, which is exactly
+# the behaviour a netns test has to respect.
+declare -A SOCKET_NS=()
+
+socket_namespace() {
+    printf '%s' "${SOCKET_NS[$1]:-}"
+}
+
 ipc_command() {
-    local socket_path=$1 command_json=$2
-    python3 - "$socket_path" "$command_json" <<'PY'
+    local socket_path=$1 command_json=$2 ns
+    ns=$(socket_namespace "$socket_path")
+    if [ -n "$ns" ]; then
+        ip netns exec "$ns" python3 "$WORK/ipc_client.py" "$socket_path" "$command_json"
+    else
+        python3 "$WORK/ipc_client.py" "$socket_path" "$command_json"
+    fi
+}
+
+write_ipc_client() {
+    cat >"$WORK/ipc_client.py" <<'PYCLIENT'
 import json
 import socket
 import struct
@@ -211,7 +229,7 @@ if outcome.get("status") == "rejected":
     print(json.dumps(outcome, indent=2, ensure_ascii=False))
     raise SystemExit(3)
 print(json.dumps(outcome, indent=2, ensure_ascii=False))
-PY
+PYCLIENT
 }
 
 snapshot_to() {
@@ -618,6 +636,10 @@ SH
     N2PID=$!
     NODE1_SOCK="$WORK/node1/run/node.sock"
     NODE2_SOCK="$WORK/node2/run/node.sock"
+    SOCKET_NS["$HOST_SOCK"]="$NSH"
+    SOCKET_NS["$NODE1_SOCK"]="$NS1"
+    SOCKET_NS["$NODE2_SOCK"]="$NS2"
+    write_ipc_client
     wait_for_socket "$NODE1_SOCK" 60 || { tail -160 "$WORK/node1/node.log" >&2 || true; fail "node1 socket did not appear"; }
     wait_for_socket "$NODE2_SOCK" 60 || { tail -160 "$WORK/node2/node.log" >&2 || true; fail "node2 socket did not appear"; }
     snapshot_to "$NODE1_SOCK" "$WORK/node1-identity.json"
@@ -976,7 +998,8 @@ SH
     info "case 6: poison node1 resolver and collect diagnostics"
     mkdir -p /etc/netns/"$NS1"
     printf 'nameserver 203.0.113.53\noptions timeout:1 attempts:1\n' >/etc/netns/"$NS1"/resolv.conf
-    if timeout 60s env -u DISPLAY FUCKIPV6_RUNTIME_DIR="$WORK/node1/run" FUCKIPV6_CONFIG_DIR="$WORK/node1/config" \
+    if timeout 60s ip netns exec "$NS1" env -u DISPLAY FUCKIPV6_RUNTIME_DIR="$WORK/node1/run" \
+        FUCKIPV6_CONFIG_DIR="$WORK/node1/config" \
         "$BIN" diagnostics --json >"$WORK/case6-diagnostics.json" 2>"$WORK/case6-diagnostics.err"; then
         :
     else

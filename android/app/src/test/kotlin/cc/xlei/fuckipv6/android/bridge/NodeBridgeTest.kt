@@ -59,7 +59,7 @@ class NodeBridgeTest {
             networks = listOf(NetworkLabel("net-1", "家庭网络")),
             snapshotRevision = 7,
         )
-        val state = NodeBridge.toBridgeState(SnapshotResult.Ok(view))
+        val state = NodeBridge.toBridgeState(SnapshotResult.Ok(ParsedSnapshot(view, null)))
         assertTrue(state is BridgeState.Ready)
         state as BridgeState.Ready
         assertEquals(7L, state.snapshotRevision)
@@ -103,10 +103,13 @@ class NodeBridgeTest {
         assertTrue(bridge.state().value is BridgeState.Failed)
 
         next = SnapshotResult.Ok(
-            SnapshotFileView(
-                capability = null,
-                networks = emptyList(),
-                snapshotRevision = 1,
+            ParsedSnapshot(
+                SnapshotFileView(
+                    capability = null,
+                    networks = emptyList(),
+                    snapshotRevision = 1,
+                ),
+                relay = null,
             ),
         )
         bridge.pollOnce()

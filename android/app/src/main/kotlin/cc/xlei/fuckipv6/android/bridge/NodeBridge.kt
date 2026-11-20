@@ -20,7 +20,11 @@ import kotlinx.coroutines.launch
  */
 sealed interface BridgeState {
     data object NotConfigured : BridgeState
-    data class Ready(val data: FilePageData, val snapshotRevision: Long?) : BridgeState
+    data class Ready(
+        val data: FilePageData,
+        val snapshotRevision: Long?,
+        val relay: RelaySurface? = null,
+    ) : BridgeState
     data class Failed(val failure: BridgeFailure) : BridgeState
 
     val isReady: Boolean
@@ -59,7 +63,11 @@ class NodeBridge(
 
     companion object {
         fun toBridgeState(result: SnapshotResult): BridgeState = when (result) {
-            is SnapshotResult.Ok -> BridgeState.Ready(result.view.toPageData(), result.view.snapshotRevision)
+            is SnapshotResult.Ok -> BridgeState.Ready(
+                data = result.view.file.toPageData(),
+                snapshotRevision = result.view.file.snapshotRevision,
+                relay = result.view.relay,
+            )
             is SnapshotResult.Failed -> BridgeState.Failed(result.failure)
         }
 

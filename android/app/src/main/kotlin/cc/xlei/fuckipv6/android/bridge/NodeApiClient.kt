@@ -6,7 +6,7 @@ import java.net.URL
 
 /** One snapshot fetch result. Never throws: failures are values. */
 sealed interface SnapshotResult {
-    data class Ok(val view: SnapshotFileView) : SnapshotResult
+    data class Ok(val view: ParsedSnapshot) : SnapshotResult
     data class Failed(val failure: BridgeFailure) : SnapshotResult
 }
 
@@ -48,7 +48,7 @@ class HttpSnapshotSource(
             when {
                 status == HttpURLConnection.HTTP_OK -> {
                     val body = connection.inputStream.bufferedReader().use { it.readText() }
-                    SnapshotJsonParser.parse(body).fold(
+                    SnapshotJsonParser.parseSnapshot(body).fold(
                         onSuccess = { SnapshotResult.Ok(it) },
                         onFailure = { SnapshotResult.Failed(BridgeFailure.Malformed) },
                     )

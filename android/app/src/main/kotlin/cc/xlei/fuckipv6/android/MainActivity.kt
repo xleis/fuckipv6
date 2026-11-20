@@ -14,10 +14,17 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
+import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
 import cc.xlei.fuckipv6.android.bridge.BridgeState
+import cc.xlei.fuckipv6.android.bridge.CommandJson
 import cc.xlei.fuckipv6.android.bridge.HttpSnapshotSource
 import cc.xlei.fuckipv6.android.bridge.NodeApiConfig
 import cc.xlei.fuckipv6.android.bridge.NodeBridge
+import cc.xlei.fuckipv6.android.bridge.NodeCommandBridge
+import cc.xlei.fuckipv6.android.bridge.NodeCommandClient
+import cc.xlei.fuckipv6.android.bridge.RelaySurface
+import cc.xlei.fuckipv6.android.ui.RelayPageData
 import cc.xlei.fuckipv6.android.contract.SharedContractLoader
 import cc.xlei.fuckipv6.android.ui.ContractFailureScreen
 import cc.xlei.fuckipv6.android.ui.FuckIpv6App
@@ -27,6 +34,8 @@ class MainActivity : ComponentActivity() {
     private val bridgeScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var pollJob: Job? = null
     private var bridge: NodeBridge? = null
+    private var commandBridge: NodeCommandBridge? = null
+    private val requestSequence = AtomicLong(System.currentTimeMillis())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -41,18 +50,24 @@ class MainActivity : ComponentActivity() {
                 bridge = candidate
                 pollJob = candidate.start(bridgeScope)
             }
+        commandBridge = apiConfig
+            ?.takeIf { it.isValid }
+            ?.let { NodeCommandBridge(NodeCommandClient(it)) }
 
         setContent {
             val bridgeState by remember(node) {
                 node?.state() ?: MutableStateFlow<BridgeState>(BridgeState.NotConfigured)
             }.collectAsState()
-            val files = (bridgeState as? BridgeState.Ready)?.data
+            val ready = bridgeState as? BridgeState.Ready
+            val files = ready?.data
             val filesFailureKey = (bridgeState as? BridgeState.Failed)?.failure?.uiStateKey
+            val relay = ready?.relay?.let(::relayPageData)
             FuckIpv6Theme {
                 contracts.fold(
                     onSuccess = {
                         FuckIpv6App(
                             contracts = it,
+                            relay = relay,
                             files = files,
                             filesFailureKey = filesFailureKey,
                         )
@@ -61,6 +76,44 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    /**
+     * Builds the Relay page state from the authoritative snapshot and wires the
+     * switch to the command channel. The switch does not assume success: the
+     * snapshot poll is what flips `relayEnabled` once the operation completes.
+     */
+    private fun relayPageData(surface: RelaySurface): RelayPageData = RelayPageData(
+        networkName = surface.networkName,
+        relayEnabled = surface.relayEnabled,
+        health = surface.health,
+        governance = surface.governance,
+        grantedPermissions = surface.permissions,
+        // Without a command channel the page must not offer the action at all.
+        backendAvailable = commandBridge != null,
+        onSetRelayRole = { enabled ->
+            val commands = commandBridge
+            if (commands == null) {
+                Unit
+            } else {
+                val body = CommandJson.envelope(
+                    command = CommandJson.setNetworkRole(
+                        networkName = surface.networkName,
+                        role = "relay",
+                        enabled = enabled,
+                    ),
+                    requestId = nextRequestId(),
+                    idempotencyKey = "relay-${surface.networkName}-$enabled-${UUID.randomUUID()}",
+                )
+                commands.submit(bridgeScope, body)
+                Unit
+            }
+        },
+    )
+
+    private fun nextRequestId(): Long {
+        val candidate = requestSequence.incrementAndGet()
+        return if (candidate > 0) candidate else 1
     }
 
     override fun onDestroy() {

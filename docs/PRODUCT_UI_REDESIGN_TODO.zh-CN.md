@@ -4172,6 +4172,16 @@ debug 测试构建；命令为
 `CommandBridgeTest` 9 项覆盖编码、URL、各状态映射与轮询上限，Android 单测共 41 项通过。页面动作接线仍需先把手里的
 快照映射成生成 DTO（Relay/AdminRecovery 页的 `onSetRelayRole` 等回调已就绪），因此 W16-01 保持 `[ ]`。
 
+**补充（2026-11-20，Relay 页接通命令通道）**：`SnapshotJsonParser` 现在同时解析 Relay 切片（`RelaySurface`）：
+从 `networks[].roles` 找出带 `relay` 角色的网络，取同 `network_name` 的 `embedded_services[].relay_health`，并把
+`permissions.permissions` 映射为 `NodePermission`；只有 `status` 与 `lifecycle` 都能解析时才构造健康记录，否则整条健康
+记录被丢弃（页面按未知处理），未知枚举线值由 `wireEnum` 收敛为 `null` 而不是抛异常，也不会落到"看起来健康"的值；
+治理事件暂不映射，`governance` 保持 `null`，不伪装成"无事件"。`MainActivity` 用该切片构造 `RelayPageData`，并把
+`onSetRelayRole` 接到命令通道：确认后提交 `set_network_role`（带 `request_id` 与 `idempotency_key`），开关状态只由后续
+快照轮询更新，不在本地推断成功；没有命令通道时 `backendAvailable=false`，动作直接禁用。新增 `RelaySnapshotParseTest`
+4 项，Android 单测共 45 项通过，`:app:lintDebug`、`:app:assembleDebug` 通过。AdminRecovery/成员/策略等页面仍需各自的
+快照切片映射，W16-01 保持 `[ ]`。
+
 ### W16-02 前台 VpnService 生命周期 `[ ]`
 
 - [ ] 使用前台服务承载 VpnService 和数据面；

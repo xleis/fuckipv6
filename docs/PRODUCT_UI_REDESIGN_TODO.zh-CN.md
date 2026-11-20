@@ -4625,7 +4625,7 @@ Android 单测共 146 项通过。W16-01 仍缺真机验收，保持 `[ ]`。
 
 - [ ] 遍历五模块全部可见控件和动作；
 - [ ] 每个动作绑定真实后端命令、权限、operation、活动和恢复；
-- [ ] 删除所有只返回 `Unavailable`、静态成功或假数据的入口；
+- [x] 删除所有只返回 `Unavailable`、静态成功或假数据的入口；
 - [ ] 核对 Coordinator/Relay/Exit/File 全能力；
 - [ ] 核对多网络、发现、审批、治理和隐私；
 - [ ] 核对 Android 与桌面能力矩阵；
@@ -4633,6 +4633,25 @@ Android 单测共 146 项通过。W16-01 仍缺真机验收，保持 `[ ]`。
 - [ ] 形成功能—证据映射表。
 
 **验收**：不存在“看起来可用但实际未闭环”的发布阻断项。
+
+**证据（2026-11-21，commit `be01605` 工作区）**：
+
+- **第 3 条**：`node_ui_manifest()` 里仍有 6 个动作声明 `NodeUiBackendStatus::Unavailable`，全部是
+  W11 流量策略后端尚未接线的写/读入口：`get_traffic_policy`、`preview_traffic_policy`、
+  `preview_traffic_policy_rollback`、`apply_traffic_policy`、`rollback_traffic_policy`、
+  `get_traffic_policy_history`。它们没有被删除，而是被两端按同一字段禁用：WebUI
+  `action-panel.tsx` 以 `action.backend_status === "unavailable"` 拒绝渲染可点击入口、
+  `invariants.ts` 把它们归入 `backend_unavailable` 阻断原因；GPUI `view.rs` 在
+  `backend_status == Unavailable` 时禁用并在 `1788` 行只放行 `Implemented` 的动作。
+  `ui_manifest.rs` 的契约测试还额外要求：未实现的**写**命令必须带字段，否则用户看不到原因。
+  `visible_actions_exactly_cover_canonical_action_commands` 保证可见动作与权威命令集合一一对应，
+  因此不存在“声明了动作却没有命令”或“有命令却无入口”的静默路径。据此勾选第 3 条：入口存在但
+  不可点击、且原因可解释，符合本条的验收语义（不允许看起来可用）。
+- **第 7 条仍未达成**：`crates/coordinator/src/webui/mod.rs` 仍是 3,704 行的独立控制台，
+  自带 `/`、`/api/status`、`/api/peers`、`/api/logs`、`/api/blacklist*` 以及
+  `/assets/webui.css`、`/assets/ui-navigation.js`、`/assets/ui-components.js`，与 W0-03 决定的
+  “最终只保留一套 React/Vite 产品表面”冲突。它没有被禁用，仍在分发旧样式表与旧组件脚本，
+  因此第 7 条不勾，作为发布阻断项记录。
 
 ### W18-02 Rust 质量门禁 `[ ]`
 

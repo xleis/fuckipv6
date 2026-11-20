@@ -70,6 +70,7 @@ fun FuckIpv6App(
     traffic: cc.xlei.fuckipv6.android.bridge.TrafficView? = null,
     logs: cc.xlei.fuckipv6.android.bridge.LogsFeed? = null,
     identity: cc.xlei.fuckipv6.android.bridge.IdentityView? = null,
+    networks: List<cc.xlei.fuckipv6.android.bridge.NetworkView>? = null,
     members: cc.xlei.fuckipv6.android.bridge.MemberDirectoryView? = null,
     onRefreshMembers: (() -> Unit)? = null,
     onMemberLifecycleAction: ((String, cc.xlei.fuckipv6.android.bridge.MemberView) -> Unit)? = null,
@@ -181,6 +182,7 @@ fun FuckIpv6App(
                 traffic = traffic,
                 logs = logs,
                 identity = identity,
+                networks = networks,
                 members = members,
                 onRefreshMembers = onRefreshMembers,
                 onMemberLifecycleAction = onMemberLifecycleAction,
@@ -245,6 +247,7 @@ fun PageContent(
     traffic: cc.xlei.fuckipv6.android.bridge.TrafficView? = null,
     logs: cc.xlei.fuckipv6.android.bridge.LogsFeed? = null,
     identity: cc.xlei.fuckipv6.android.bridge.IdentityView? = null,
+    networks: List<cc.xlei.fuckipv6.android.bridge.NetworkView>? = null,
     members: cc.xlei.fuckipv6.android.bridge.MemberDirectoryView? = null,
     onRefreshMembers: (() -> Unit)? = null,
     onMemberLifecycleAction: ((String, cc.xlei.fuckipv6.android.bridge.MemberView) -> Unit)? = null,
@@ -354,6 +357,8 @@ fun PageContent(
                     locale = locale,
                     contracts = contracts,
                 )
+            pageId == "networks" && networks != null ->
+                NetworksContent(contracts = contracts, locale = locale, networks = networks)
             pageId == "logs" && logs != null ->
                 LogsContent(contracts = contracts, locale = locale, feed = logs)
             pageId == "identity" && identity != null ->

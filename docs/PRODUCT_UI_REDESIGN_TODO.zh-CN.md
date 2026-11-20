@@ -3049,8 +3049,8 @@ IPv4 `/32`、IPv6 `/128` TUN 路由在传输前后保持存在，未创建 IPv4 
 
 ### W12-09 抗干扰与 24 小时稳定性 `[ ]`
 
-- [ ] 覆盖高延迟、抖动、丢包、断连、DNS 污染和 MTU 问题；
-- [ ] 覆盖端口阻断、QUIC 降级和 TCP fallback（若支持）；
+- [x] 覆盖高延迟、抖动、丢包、断连、DNS 污染和 MTU 问题（矩阵 2026-11-20：delay_jitter、packet_loss、blackout、path_mtu、poisoned_resolver 全通过）；
+- [x] 覆盖端口阻断、QUIC 降级和 TCP fallback（若支持）（signalling_port_block 通过；产品无 QUIC→TCP 自动降级，能力检查记为 skipped）；
 - [ ] 覆盖网络切换、休眠、唤醒和长时间空闲；
 - [x] 两个独立 netns/节点同网后完成双向 ICMP，并捕获直接 P2P UDP；
 - [x] 真实香港节点同网后完成 IPv4/IPv6 双向 TCP 262144 字节与 UDP 65536 字节/64 包负载；
@@ -3064,10 +3064,10 @@ IPv4 `/32`、IPv6 `/128` TUN 路由在传输前后保持存在，未创建 IPv4 
   `fail_closed(exit_unavailable) → 重新选路 → protected` 的恢复过程。该证据范围是隔离 netns，不含 WAN；
 - [ ] 运行 24 小时持续会话并记录失败/恢复；
 - [ ] 监控内存、连接、文件描述符和临时文件增长；
-- [ ] 测试结束自动清理 TUN、路由、DNS 和子进程；
-- [ ] 失败能恢复，不能留下需手工 kill 的状态；
+- [x] 测试结束自动清理 TUN、路由、DNS 和子进程（矩阵 cleanup 用例 + Exit 验收的 `resolv.conf`/`nsswitch.conf` 逐字节恢复）；
+- [x] 失败能恢复，不能留下需手工 kill 的状态（blackout/route-switch/node-freeze 自动回到 healthy；镜像 Exit 会话记录 `fail_closed → protected`；TERM 后无残留进程）；
 - [x] 记录宿主生命周期事故并形成操作红线；
-- [ ] 抗干扰报告只声明特定环境和时间段的结果。
+- [x] 抗干扰报告只声明特定环境和时间段的结果（矩阵与浸泡均写明拓扑、时间窗与证据目录）；
 
 **2026-11-13 生命周期事故**：在活动宿主实例上执行非原子 `down -> kill -> systemd-run/up`，替代实例因非
 headless 启动失败，随后又只终止 `__node`，造成 TUN、路由、DNS 与进程所有权失配。用户后续的 `kill` 是恢复动作，

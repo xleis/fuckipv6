@@ -40,13 +40,14 @@
 - 任何 `null` 切片都必须落到页面的 “未观察/不可用” 状态，不能填默认值冒充实时数据。
 - 动作按钮只在对应回调非空且后端可用时启用（`backendAvailable` 已由 resolver 设置）。
 - 新增字符串必须同时加入 zh-CN 与 en 并保持键集对齐；能复用 `file.page.*` / `state.*` 的不要新造。
-- 提交前跑：`:app:testDebugUnitTest`、`:app:lintDebug`、`:app:assembleDebug`、`scripts/check-docs.py`。
+- 提交前跑：`:app:testDebugUnitTest`、`:app:lintDebug`、`:app:assembleDebug`、`scripts/check-docs.py`、
+  `python3 scripts/check-android-i18n.py`（字面量键必须同时存在于 zh-CN 与 en，插值键按运行时闭集由单测覆盖）。
 
 ## 4. 验证基线（2026-11-21）
 
 在 HEAD + 本批文件（不含其他会话未提交改动）的独立 worktree 中实测：
 
-- `:app:testDebugUnitTest` → **108 项通过 / 0 失败**
+- `:app:testDebugUnitTest` → **148 项通过 / 0 失败**
 - `:app:lintDebug`、`:app:assembleDebug` → 通过
 - `scripts/check-docs.py` → passed
 

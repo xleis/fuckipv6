@@ -66,6 +66,8 @@ fun FuckIpv6App(
     selectedNetworkName: String? = null,
     onSelectNetwork: ((String) -> Unit)? = null,
     peers: cc.xlei.fuckipv6.android.bridge.PeersSnapshot? = null,
+    activity: cc.xlei.fuckipv6.android.bridge.ActivityFeed? = null,
+    traffic: cc.xlei.fuckipv6.android.bridge.TrafficView? = null,
     members: cc.xlei.fuckipv6.android.bridge.MemberDirectoryView? = null,
     onRefreshMembers: (() -> Unit)? = null,
     onMemberLifecycleAction: ((String, cc.xlei.fuckipv6.android.bridge.MemberView) -> Unit)? = null,
@@ -173,6 +175,8 @@ fun FuckIpv6App(
                 selectedNetworkName = selectedNetworkName,
                 onSelectNetwork = onSelectNetwork,
                 peers = peers,
+                activity = activity,
+                traffic = traffic,
                 members = members,
                 onRefreshMembers = onRefreshMembers,
                 onMemberLifecycleAction = onMemberLifecycleAction,
@@ -233,6 +237,8 @@ fun PageContent(
     selectedNetworkName: String? = null,
     onSelectNetwork: ((String) -> Unit)? = null,
     peers: cc.xlei.fuckipv6.android.bridge.PeersSnapshot? = null,
+    activity: cc.xlei.fuckipv6.android.bridge.ActivityFeed? = null,
+    traffic: cc.xlei.fuckipv6.android.bridge.TrafficView? = null,
     members: cc.xlei.fuckipv6.android.bridge.MemberDirectoryView? = null,
     onRefreshMembers: (() -> Unit)? = null,
     onMemberLifecycleAction: ((String, cc.xlei.fuckipv6.android.bridge.MemberView) -> Unit)? = null,
@@ -342,6 +348,10 @@ fun PageContent(
                     locale = locale,
                     contracts = contracts,
                 )
+            pageId == "activity" && activity != null ->
+                ActivityContent(contracts = contracts, locale = locale, feed = activity)
+            pageId == "traffic" && traffic != null ->
+                TrafficContent(contracts = contracts, locale = locale, traffic = traffic)
             pageId == "peers" && peers != null ->
                 PeersContent(contracts = contracts, locale = locale, peers = peers)
             pageId == "relay" && relay != null && relay.backendAvailable ->

@@ -61,6 +61,24 @@ class I18nCatalog internal constructor(
     val defaultLocale: String,
     private val messages: Map<String, Map<String, String>>,
 ) {
+    /**
+     * Whether the resolved locale actually carries [key]. Callers that build a
+     * key from server-provided identifiers (action names, outcome codes) must
+     * check first: `translate` falls back to the key itself, which would put a
+     * raw identifier on screen.
+     */
+    fun has(locale: Locale, key: String): Boolean {
+        val localeKey = when {
+            locale.language.equals("zh", ignoreCase = true) -> "zh-CN"
+            else -> defaultLocale
+        }
+        return messages[localeKey]?.containsKey(key) == true
+    }
+
+    /** Translated label for [key], or [fallback] when the catalog lacks it. */
+    fun translateOr(locale: Locale, key: String, fallback: String): String =
+        if (has(locale, key)) translate(locale, key) else fallback
+
     fun translate(locale: Locale, key: String, params: Map<String, String> = emptyMap()): String {
         val localeKey = when {
             locale.language.equals("zh", ignoreCase = true) -> "zh-CN"

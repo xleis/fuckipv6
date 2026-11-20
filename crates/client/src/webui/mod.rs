@@ -2790,7 +2790,9 @@ mod tests {
     }
 
     async fn response_text(response: axum::response::Response) -> String {
-        let bytes = to_bytes(response.into_body(), 1024 * 1024)
+        // The embedded WebUI bundle is a real Vite build and already exceeds
+        // 1 MiB, so this helper needs headroom beyond a single asset's size.
+        let bytes = to_bytes(response.into_body(), 16 * 1024 * 1024)
             .await
             .expect("response body");
         String::from_utf8(bytes.to_vec()).expect("UTF-8 response")

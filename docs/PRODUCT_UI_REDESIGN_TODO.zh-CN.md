@@ -4293,6 +4293,13 @@ generation 守卫丢弃过期目录响应，避免切目录后迟到的分页覆
 `uploadLength`（不猜大小）。App 仍不直接写主机路径。`:app:lintDebug`、`:app:assembleDebug` 通过；真机选择器接线与设备验收
 仍属 W16，W16-01 保持 `[ ]`。
 
+**补充（2026-11-21，页面挂载契约）**：新增 `ui/AppSurfaces` 与 `SurfaceResolver`：把 `BridgeState`（含恢复列表、浏览状态、
+传输状态、设置）解析成 shell 需要的全部页面数据，`NotConfigured` 只给设置页、`Failed` 只给失败原因、`Ready` 才填
+File/Relay/Coordinator/AdminRecovery；AdminRecovery 的网络名/id 只取快照解析结果；回调统一收敛到 `SurfaceHandlers`。
+新增 `AppSurfacesTest` 6 项，Android 单测共 108 项通过。挂载步骤与硬性要求见
+[W16_ANDROID_SURFACE_MOUNT.zh-CN.md](W16_ANDROID_SURFACE_MOUNT.zh-CN.md)；因 `FuckIpv6App`/`MainActivity` 仍带其他会话
+未提交改动，挂载提交需等待文件回稳，W16-01 保持 `[ ]`。
+
 ### W16-02 前台 VpnService 生命周期 `[ ]`
 
 - [ ] 使用前台服务承载 VpnService 和数据面；

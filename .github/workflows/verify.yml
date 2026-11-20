@@ -51,7 +51,7 @@ jobs:
       - name: Install native build dependencies
         run: >-
           sudo apt-get update &&
-          sudo apt-get install -y libfontconfig1-dev libfreetype-dev pkg-config
+          sudo apt-get install -y libfontconfig1-dev libfreetype-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev pkg-config
 
       - name: Install Node.js
         uses: actions/setup-node@v4
@@ -98,7 +98,7 @@ jobs:
       - name: Install native build dependencies
         run: >-
           sudo apt-get update &&
-          sudo apt-get install -y libfontconfig1-dev libfreetype-dev pkg-config
+          sudo apt-get install -y libfontconfig1-dev libfreetype-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev pkg-config
 
       - name: Install Node.js
         uses: actions/setup-node@v4
@@ -179,7 +179,7 @@ jobs:
       - name: Install native build dependencies
         run: >-
           sudo apt-get update &&
-          sudo apt-get install -y libfontconfig1-dev libfreetype-dev pkg-config
+          sudo apt-get install -y libfontconfig1-dev libfreetype-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev pkg-config
 
       - name: Test public API attack surface
         run: ./scripts/test-public-api-attack-surface.sh
@@ -212,6 +212,7 @@ jobs:
           sudo apt-get install -y
           xvfb libvulkan1 mesa-vulkan-drivers
           libxcb1 libxcb-xkb1 libxkbcommon0 libxkbcommon-x11-0
+          libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
           libfontconfig1-dev libfreetype-dev pkg-config
 
       - name: Build native node binary
@@ -250,7 +251,8 @@ jobs:
           sudo apt-get install -y
           xvfb libvulkan1 mesa-vulkan-drivers
           libxcb1 libxcb-xkb1 libxkbcommon0 libxkbcommon-x11-0
-          fonts-inter libfontconfig1-dev libfreetype-dev pkg-config
+          fonts-inter libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
+          libfontconfig1-dev libfreetype-dev pkg-config
 
       - name: Install WebUI dependencies
         run: npm ci --prefix webui
@@ -282,7 +284,7 @@ jobs:
       - name: Install MinGW
         run: >-
           sudo apt-get update &&
-          sudo apt-get install -y mingw-w64 libfontconfig1-dev libfreetype-dev pkg-config
+          sudo apt-get install -y mingw-w64 libfontconfig1-dev libfreetype-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev pkg-config
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

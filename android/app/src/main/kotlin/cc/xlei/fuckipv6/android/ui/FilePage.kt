@@ -90,24 +90,6 @@ fun FilePageContent(
                     value = available,
                 )
             }
-            data.shareRevision?.let { revision ->
-                FileDetailRow(
-                    contracts = contracts,
-                    locale = locale,
-                    testTag = "file-capability-share-revision",
-                    labelKey = "file.page.breadcrumb",
-                    value = revision.toString(),
-                )
-            }
-            data.accessEpoch?.let { epoch ->
-                FileDetailRow(
-                    contracts = contracts,
-                    locale = locale,
-                    testTag = "file-capability-access-epoch",
-                    labelKey = "file.page.table.modified",
-                    value = epoch.toString(),
-                )
-            }
             data.rootErrorCode?.let { code ->
                 Text(
                     modifier = Modifier.testTag("file-capability-root-error"),
@@ -117,6 +99,17 @@ fun FilePageContent(
                 )
             }
 
+            if (data.shareRevision != null || data.accessEpoch != null) {
+                Text(
+                    modifier = Modifier.testTag("file-capability-revisions"),
+                    text = listOfNotNull(
+                        data.shareRevision?.let { "share_revision=$it" },
+                        data.accessEpoch?.let { "access_epoch=$it" },
+                    ).joinToString(" · "),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             Text(
                 text = contracts.i18n.translate(locale, "file.page.local_state.detail"),
                 style = MaterialTheme.typography.bodyMedium,

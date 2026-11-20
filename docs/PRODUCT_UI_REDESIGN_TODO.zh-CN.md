@@ -4328,6 +4328,11 @@ DOS 设备名；provider 不报大小或名字时不提交）后流式上传；�
 `MainActivity` 用独立命令桥按网络 id 读取 `list_network_members`，网络切换自动重读并支持手动刷新。共享 i18n 新增 5 组中英键。
 Android 单测 121 项通过。生命周期写命令（改角色/移除成员）与 VpnService 仍未接线，W16-01/W16-02 保持 `[ ]`。
 
+**补充（2026-11-21，成员生命周期命令）**：新增 `bridge/MemberLifecycle`（`change_member_lifecycle` 编码与结果解析）；动作/角色为
+封闭集合，未知值、空身份、负 revision 本地拒绝；UI 只对目录里 `available_actions` 出现的动作显示按钮，点击走既有确认对话
+（含后果说明），确认后以 `member.revision` 作 CAS 提交，成功只刷新目录、不在本地改状态。新增 `MemberLifecycleTest` 4 项，
+Android 单测共 125 项通过。加入申请审批（`review_join_request`）与 VpnService 仍未接线，W16-01/W16-02 保持 `[ ]`。
+
 ### W16-02 前台 VpnService 生命周期 `[ ]`
 
 - [ ] 使用前台服务承载 VpnService 和数据面；

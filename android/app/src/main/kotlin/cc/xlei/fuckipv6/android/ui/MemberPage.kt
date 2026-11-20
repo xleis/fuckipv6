@@ -5,11 +5,16 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -17,6 +22,7 @@ import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import cc.xlei.fuckipv6.android.bridge.MemberDirectoryView
+import cc.xlei.fuckipv6.android.bridge.MemberLifecycleSurface
 import cc.xlei.fuckipv6.android.bridge.MemberView
 import cc.xlei.fuckipv6.android.contract.SharedContracts
 import java.util.Locale
@@ -35,7 +41,9 @@ fun MemberListContent(
     locale: Locale,
     directory: MemberDirectoryView?,
     onRefresh: () -> Unit,
+    onLifecycleAction: ((String, MemberView) -> Unit)? = null,
 ) {
+    var pendingAction by remember { mutableStateOf<Pair<String, MemberView>?>(null) }
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -83,10 +91,51 @@ fun MemberListContent(
                 )
             } else {
                 directory.members.forEach { member ->
-                    MemberRow(contracts = contracts, locale = locale, member = member)
+                    MemberRow(
+                        contracts = contracts,
+                        locale = locale,
+                        member = member,
+                        onLifecycleAction = onLifecycleAction?.let { callback ->
+                            { action -> pendingAction = action to member }
+                        },
+                    )
                 }
             }
         }
+    }
+    pendingAction?.let { (action, member) ->
+        AlertDialog(
+            onDismissRequest = { pendingAction = null },
+            title = {
+                Text(contracts.i18n.translate(locale, "confirm.change_member_lifecycle.title"))
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(member.displayName ?: member.nodeId)
+                    Text(
+                        contracts.i18n.translate(locale, "confirm.change_member_lifecycle.consequence"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    modifier = Modifier.testTag("member-confirm-${member.nodeId}-$action"),
+                    onClick = {
+                        pendingAction = null
+                        onLifecycleAction?.invoke(action, member)
+                    },
+                ) {
+                    Text(contracts.i18n.translate(locale, "common.confirm_action".replace("{action}", "")))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingAction = null }) {
+                    Text(contracts.i18n.translate(locale, "common.cancel"))
+                }
+            },
+        )
     }
 }
 
@@ -95,6 +144,7 @@ private fun MemberRow(
     contracts: SharedContracts,
     locale: Locale,
     member: MemberView,
+    onLifecycleAction: ((String) -> Unit)?,
 ) {
     val label = member.displayName ?: member.nodeId
     Column(
@@ -117,5 +167,21 @@ private fun MemberRow(
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        val actions = member.availableActions.filter { it in MemberLifecycleSurface.ACTIONS }
+        if (actions.isNotEmpty() && onLifecycleAction != null) {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                actions.forEach { action ->
+                    TextButton(
+                        modifier = Modifier.testTag("member-action-${member.nodeId}-$action"),
+                        onClick = { onLifecycleAction(action) },
+                    ) {
+                        Text(
+                            contracts.i18n.translate(locale, "choice.member_lifecycle.$action"),
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    }
+                }
+            }
+        }
     }
 }

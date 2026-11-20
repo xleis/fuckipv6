@@ -34,7 +34,10 @@ import cc.xlei.fuckipv6.android.bridge.NodeCommandBridge
 import cc.xlei.fuckipv6.android.bridge.NodeCommandClient
 import cc.xlei.fuckipv6.android.bridge.FileBrowseClient
 import cc.xlei.fuckipv6.android.bridge.MemberDirectoryView
+import cc.xlei.fuckipv6.android.bridge.MemberLifecycleRequest
+import cc.xlei.fuckipv6.android.bridge.MemberLifecycleSurface
 import cc.xlei.fuckipv6.android.bridge.MemberSurface
+import cc.xlei.fuckipv6.android.bridge.MemberView
 import cc.xlei.fuckipv6.android.bridge.DirectoryEntry
 import cc.xlei.fuckipv6.android.bridge.FileTransferClient
 import cc.xlei.fuckipv6.android.bridge.HttpDownloadFetcher
@@ -124,10 +127,15 @@ class MainActivity : ComponentActivity() {
             ?.also { bridge ->
                 bridgeScope.launch {
                     bridge.lastOutcome().collect { outcome ->
-                        if (outcome is CommandOutcome.Succeeded &&
-                            outcome.outcomeStatus == "network_members"
-                        ) {
-                            members.value = MemberSurface.parseDirectory(outcome.data)
+                        if (outcome !is CommandOutcome.Succeeded) return@collect
+                        when (outcome.outcomeStatus) {
+                            "network_members" ->
+                                members.value = MemberSurface.parseDirectory(outcome.data)
+                            "member_lifecycle_changed" -> {
+                                // The change is authoritative; re-read the roster
+                                // instead of patching it locally.
+                                memberNetworkId?.let(::refreshMembers)
+                            }
                         }
                     }
                 }
@@ -280,6 +288,8 @@ class MainActivity : ComponentActivity() {
                             coordinator = coordinator,
                             adminRecovery = admin,
                             members = membersState,
+                            onRefreshMembers = { memberNetworkId?.let(::refreshMembers) },
+                            onMemberLifecycleAction = ::changeMemberLifecycle,
                             files = files,
                             filesFailureKey = filesFailureKey,
                         )
@@ -432,6 +442,32 @@ class MainActivity : ComponentActivity() {
         )
         // Keep the compiler honest about the unused config in this path.
         check(config.isValid)
+    }
+
+    /**
+     * Applies one member lifecycle change with the revision read from the
+     * roster. A stale revision is rejected by the Coordinator, so the UI never
+     * retries with a guessed value.
+     */
+    private fun changeMemberLifecycle(action: String, member: MemberView) {
+        val bridge = memberBridge ?: return
+        val networkId = memberNetworkId ?: return
+        val revision = member.revision ?: return
+        val command = MemberLifecycleSurface.command(
+            MemberLifecycleRequest(
+                networkId = networkId,
+                targetNodeId = member.nodeId,
+                action = action,
+                role = member.role?.takeIf { it in MemberLifecycleSurface.ROLES } ?: "member",
+                expectedRevision = revision,
+            ),
+        ) ?: return
+        val body = CommandJson.envelope(
+            command = command,
+            requestId = nextRequestId(),
+            idempotencyKey = "member-$action-${member.nodeId}-${UUID.randomUUID()}",
+        )
+        bridge.submit(bridgeScope, body)
     }
 
     /** Reads the member roster through its own command bridge. */

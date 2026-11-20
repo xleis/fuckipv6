@@ -58,7 +58,7 @@
 | W9 成员、组与拓扑 | `[~]` | P1 | W8 | 成员列表、邀请审批、组目录和拓扑聚合已完成；多网络视觉、交互、性能与 E2E 进行中 |
 | W10 安全与隐私 | `[x]` | P1 | W9 | 权限模型与矩阵、ACL/拒绝优先/本地否决、字段级隐私、策略编辑器与测试器、差异预览/原子应用/回滚、权威活动时间线、可验证长期审计、安全页面状态和可重复治理证据闭环均已完成 |
 | W11 流量路由 | `[~]` | P1 | W7,W10 | W11-01 四类决策与首条命中、W11-02 匹配条件、W11-03 应用身份与子进程继承、W11-04 未知应用与失败策略、W11-05 规则测试器领域契约、W11-06 原子应用/差异/回滚/崩溃恢复、W11-07 有界自动恢复协调器契约和 W11-09 隔离路由 E2E/失败关闭/网络报告已完成；W11-08 WebUI 已接入同一权威页面的结构化编辑、测试、应用、历史和回滚入口，GPUI 已接入同一页面的权威投影、规则/目标/影响展示和精确跳转，真实命中观测、GPUI/WebUI/Android 三端一致、生产后端接线及真实平台监听/适配待完成 |
-| W12 Exit | `[~]` | P1 | W10,W11 | W12-01 至 W12-05、W12-08 和 W12-10 已完成：本机启停、贡献治理、管理员选择、分层健康、故障切换/撤权及 Exit 页面权威分层均有自动化证据；W12-06 已完成真实 Chrome DNS、IPv4/IPv6 受控/外部探测与失败关闭复核，IPv6 外部目标仍为 `not_tested` 且保持 `fail_closed_required=true`；W12-07 已验证 Google/YouTube 页面、实际视频播放、DNS/TLS/H2/H3 和 TUN 源路径，但 yt-dlp 媒体下载仍 403；W12-08 已完成香港 Exit 对直连基线的 DNS/RTT/TCP/TLS/H3、单流吞吐和并发实测，并定位瓶颈到香港 co-located Relay/Exit 数据路径；独立 netns 已通过正式邀请入网后的双向 P2P ICMP 与直接 UDP 路径，真实香港节点随后完成 IPv4/IPv6 双向 ICMP、TCP 262144 字节、UDP 65536 字节/64 包和精确路由验收，并通过真实增量证明 IPv4 目标流量归入规范 IPv6 Peer 身份且两侧 Peer/网络级 P2P 计数一致；W12-07 的非浏览器完整文件下载与自动 DNS 清理、两侧 Exit 可达和 W12-09 的 24 小时稳定性仍待完成 |
+| W12 Exit | `[~]` | P1 | W10,W11 | W12-01 至 W12-05、W12-08 和 W12-10 已完成：本机启停、贡献治理、管理员选择、分层健康、故障切换/撤权及 Exit 页面权威分层均有自动化证据；W12-06 已完成真实 Chrome DNS、IPv4/IPv6 受控/外部探测与失败关闭复核，IPv6 外部目标仍为 `not_tested` 且保持 `fail_closed_required=true`；W12-07 已验证 Google/YouTube 页面、实际视频播放、DNS/TLS/H2/H3 和 TUN 源路径，但 yt-dlp 媒体下载仍 403；W12-08 已完成香港 Exit 对直连基线的 DNS/RTT/TCP/TLS/H3、单流吞吐和并发实测，并定位瓶颈到香港 co-located Relay/Exit 数据路径；独立 netns 已通过正式邀请入网后的双向 P2P ICMP 与直接 UDP 路径，真实香港节点随后完成 IPv4/IPv6 双向 ICMP、TCP 262144 字节、UDP 65536 字节/64 包和精确路由验收，并通过真实增量证明 IPv4 目标流量归入规范 IPv6 Peer 身份且两侧 Peer/网络级 P2P 计数一致；W12-07 的非浏览器完整文件下载与自动 DNS 清理、两侧 Exit 可达和 W12-09 的 24 小时稳定性仍待完成；2026-11-16 补充香港主机的双 control/TUN/日志残留审计与清理、稳态探测与重启预算修复，并新增 W12-09 干扰注入脚本，但当前提交因 W14 首次任期尚未实现而无法让全新网络进入 online，上述实机项均被该前置条件阻塞 |
 | W13 Relay | `[x]` | P1 | W10 | W13-01 至 W13-07 已完成：独立热启停、intent 持久化、稳定失败原因码、双侧签名授权、拒绝优先、实时撤权、既有会话策略、owner-only 治理审计和 durable audit 导出均有自动化证据；真实 Relay 子进程运营者导出只含最小 usage/health/governance 字段，不包含载荷、虚拟地址、密钥或显示名；生产数据面故障转移写入同一 owner audit 链并合并到活动快照，临时 Coordinator Relay 冻结检查已覆盖。Linux 单 Relay 进程 SIGKILL/重启后的端口复用、旧会话不可接管和新证书恢复、真实子进程连接风暴/慢连接/资源上限/吞吐/延迟/CPU/RSS、满载期间 Snapshot/Manifest 可用性及 Relay/Coordinator/Exit 同时故障恢复均有进程或 netns 证据。GPUI、WebUI 与 Android Compose Relay 页面现统一消费共享 Manifest、`NodeSnapshot`、健康/治理投影和 `SetNetworkRole` 命令；Android 在快照或真实命令回调缺失时失败关闭，不注入示例状态。Android 的 VpnService、节点 IPC 和真机 E2E 仍归 W16，不在本项冒充平台数据面完成 |
 | W14 Coordinator 接管 | `[ ]` | P1 | W10,W12,W13 | W14-01/02/04/05/06/07/08/09/10 已完成：候选组、任期与 fencing、严格多数接管、分区无多数保护、旧 Leader 恢复、紧急临时 Leader、临时权限冻结、管理员阈值恢复、数据面连续性及脑裂/断电测试均有自动化与真实进程证据；真实多节点离线 Trustee 恢复演练（`fuckipv6.w14.admin-recovery.drill.v1`）与 root netns 分区演练已完成。W14-03 仅剩“经过审计的自研设计”一项，需要独立第三方对自研选举/任期协议出具正式审计结论 |
 | W15 File | `[~]` | P2 | W10 | 本地 domain/ACL/路径/临时文件/续传适配器、GPUI owner 设置与 IPC、GPUI/WebUI File 目录浏览/目标选择/上传下载/分页/暂停恢复/取消、并发/速率/磁盘/扫描/审计上界已落地；Linux 独立三节点真实网络传输、恢复与四槽满载控制面隔离验收已完成，Android File 表面/SAF、Windows/macOS 实机路径安全与传输竞态、跨平台验收及 OS/性能资源基线仍未完成 |
@@ -2821,6 +2821,10 @@ IPv6 外部目标和 `ipv6.google.com` 仍为 `not_tested`，不得由浏览器 
 
 相关提交：`0ff7439`、`dbd226e`。
 
+**2026-11-16 复测状态**：非浏览器完整文件下载与自动 DNS 清理本轮无法复测。当前提交上全新网络无法进入
+online（全新 Coordinator 没有初始任期，恢复校验以 `coordinator_term.error.missing` 失败，详见 W12-09 的
+2026-11-16 记录），因此没有可用的 Exit 数据面；本项继续保持 `[~]`，不以旧证据替代复测。
+
 **验收**：报告证明真实应用流量通过 Exit 可达目标，且测试后有明确清理结果。
 
 ### W12-08 吞吐、延迟、丢包与并发 `[x]`
@@ -3006,6 +3010,66 @@ headless 启动失败，随后又只终止 `__node`，造成 TUN、路由、DNS 
 不是事故原因。详细时间线、根因边界和待落实的故障注入项见
 `docs/INCIDENT_2026-11-13_NETWORK_LIFECYCLE.zh-CN.md`。本项继续保持未完成；在自动回滚、DNS 真实可用性和
 完整子进程树清理通过前，不得声明失败可恢复。
+
+**2026-11-16 香港 Exit 主机残留审计与清理**：该主机上仍有 2026-11-12 的测试实例残留：两个
+`__control`（PID 1006978、1336336，均以 `ppid=1` 存活）各自带一个 `__node`，`control.lock` 只记录较新的
+1336336，较旧的 1006978 仍在运行；`fk-w12-hk`、`fk-w12-e7` 两个 TUN 以 `state DOWN`、`persist on` 形态存在，
+并携带 `10.8.0.1/24`、`fd00::1001`、`10.77.7.1/24`、`fd77:7::1` 地址与 `/32`、`/128` 精确路由。旧 control
+以约 10 次/秒 的频率完成本地 IPC 握手后立即断开，node 端把这种正常关闭记为
+`DEBUG 本地 IPC 连接已结束 error=读取本地 IPC 帧头失败`；`host-debug.log` 在 4 天内增长到 2,290,410,142 字节
+（约 573 MB/日，磁盘占用 76%），期间该主机没有对外监听 16666/16667。
+
+清理按“先停止锁所有者、再逐级验证子进程”的顺序执行：先 `TERM 1336336`，2 秒内退出且无子进程；再
+`TERM 1006978`，同样完全退出，`pgrep -P` 无残留；`/etc/resolv.conf` 前后 SHA-256 一致
+（`578fdb88…cc577`），`resolv.conf` 不是指向 `127.0.0.2` 的残留状态；随后只截断本轮 2.29 GB 测试日志，未删除
+配置、审计账本或正式日志。审计与清理原始输出保存在 `/root/w12-09-residue-20261116T152157Z/`、
+`/root/w12-09-cleanup-20261116T152436Z/`，本机副本为 `/tmp/w12-09-residue/`。
+
+该轮同时暴露两个当前仍无法关闭的缺口，故本项目继续保持 `[ ]`：
+
+1. **TUN 残留**：两个 TUN 在所属进程全部退出后仍存在，必须手工 `ip link del` 才清除；它们的 `persist on`
+   标记不属于当前源码（当前 `crates/client/src/tun/linux.rs` 没有 `TUNSETPERSIST`），因此不能断言当前构建
+   会留下同样的残留，需用当前构建重跑停止路径后才能定性；
+2. **重复生命周期所有者**：同一 runtime 目录下允许两个 control 并存，较小 PID 的一方在失去锁记录后仍继续
+   运行并持续探测 node，是本次日志无界增长的直接原因。
+
+**对应代码修复（2026-11-16）**：`runtime_process.rs` 把稳态监督探测从 100 ms 降为 1 s（启动/停止阶段仍保持
+100 ms），并新增节点异常退出预算：300 秒窗口内连续异常退出超过 5 次即返回错误、停止自动重启，避免无界重试
+掩盖数据面故障；`local_service.rs` 把对端正常关闭（EOF/Reset/BrokenPipe）判定为正常断开，不再按连接错误记录。
+单测 `node_restart_budget_stops_after_the_limit`、`node_restart_budget_forgets_failures_outside_the_window`、
+`node_restart_budget_resets_after_a_healthy_probe`、`peer_disconnects_are_not_connection_errors`、
+`steady_state_supervision_is_cheaper_than_startup_polling` 全部通过；`cargo test -p fuckipv6-client --lib`
+为 1280 passed、0 failed、3 ignored。
+
+**2026-11-16 干扰注入矩阵（脚本已入库，执行被上游阻塞）**：新增
+`scripts/test-w12-interference-netns.sh`，在既有三 netns 邀请拓扑上逐一注入并复核恢复：150 ms 延迟/50 ms 抖动、
+20% 丢包、underlay 全阻断（要求无静默直连、peer 变为不健康、恢复后自动回到健康）、Coordinator 信令端口阻断
+（要求既有 P2P 会话继续工作）、underlay MTU 1200（大包失败、小包通过、恢复后 1280 字节通过）、投毒 resolver
+（`diagnostics` 不得宣称已验证路径）、节点进程 `SIGSTOP/SIGCONT` 冻结与恢复、underlay 默认路由切换，以及
+`stop_networks` 后 TUN、路由、子进程清理复核。脚本同时改为在与节点相同的 netns 内执行本地 IPC 客户端，因为
+当前服务端会拒绝跨网络命名空间的本地 IPC 连接。
+
+该脚本与既有的 `scripts/test-w12-p2p-invite-netns.sh` 在当前提交（`6e3935a`，二进制 SHA-256
+`88b96c8a…600c4`）上都在同一位置失败：`Coordinator owner network did not become online`。日志显示全新网络上
+客户端每轮先调用 Coordinator 恢复校验，Coordinator 以 `coordinator_term.error.missing` 拒绝“旧 Leader 恢复
+请求”，客户端随后记录 `无法验证恢复快照，治理保持只读` 并跳过该轮，网络始终无法进入 online。根因位于 W14
+台账尚未完成的部分：`runtime_control.rs::install_coordinator_term` 标注“W14-03 必须提供已认证的多数证明后
+才能调用”且当前为 `#[allow(dead_code)]`，全新网络没有任何初始任期与候选配置，恢复校验因此永远失败。
+W12 的实机验收路径现在依赖未完成的 W14 初始化，这不是用 24 小时浸泡或调参可以绕过的前置条件；证据目录为
+`/tmp/w12-interference.20261116T154104Z.3002279`、`/tmp/w12-p2p-invite.20261116T154626Z.3026722`。
+
+**2026-11-16 特权 netns 复核（清理与 Exit 内核路径）**：在当前提交（`6e3935a`）上重跑两个既有特权验收脚本，均通过：
+
+- `scripts/test-lifecycle-cleanup-netns.sh`：`native_cleanup_recovery_restores_dns_routes_and_tun` 通过。测试在
+  私有网络/挂载命名空间内使用真实 TUN、策略规则与解析文件，注入一次路由删除失败和一次 TUN 删除失败，随后验证
+  清理可重试并最终恢复 DNS、路由与 TUN，且不触碰宿主网络与 `/etc/resolv.conf`；
+- `scripts/test-exit-node-netns.sh`：`linux_netns_forwarding_nat_revocation_and_cleanup_are_effective` 与
+  `linux_netns_install_failure_rolls_back_kernel_state` 通过。测试在 client netns 与 upstream netns 之间验证真实
+  转发、conntrack、iptables NAT、撤权与回滚，以及安装失败后的内核状态回滚。
+
+这两项证明“清理可重试、失败可回滚”的内核路径仍然成立，但都不覆盖用户态 TUN 收发包、真实公网出口、两侧 Exit
+经 P2P 的可达性，也不能替代 24 小时浸泡；因此 W12-09 的相应条目仍保持未完成，只把它们记为特定环境下的
+内核路径证据。
 
 **验收**：没有 24 小时稳定性与多场景证据时，不得给出“抗干扰强”或“长期可用”结论。
 

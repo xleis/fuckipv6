@@ -2867,6 +2867,13 @@ Exit 贡献策略（W12-02 的贡献治理）后再复跑 `scripts/test-w12-exit
 slirp 上行，WAN 版 `scripts/test-w12-exit-download-wan.sh` 仍受"slirp NAT 下 `p2p_healthy=false`、Exit readiness
 需要健康 P2P"限制，"两侧 Exit 可达"（以 Exit 作客户端反向验证）未完成。因此本项保持 `[~]`。
 
+**2026-11-20 WAN 版复跑结论**：`scripts/test-w12-exit-download-wan.sh` 已补齐与本地版相同的授权链（远端 IPC 改为
+stdin 传 JSON、候选声明 15 分钟上限并在会话前刷新、`apply_policy` 贡献策略、`exit_contribution_mode=autonomous`、
+Exit 目录固定选择、owner terms 确认）。在无 root 的 slirp 上行环境中仍无法进入 protected：
+成员快照 `p2p_healthy=false`（slirp 无入站映射，双向健康判定不成立），且成员目录刷新持续
+`审批控制请求超时`，Exit 贡献授权随之失败关闭；客户端对代理流量保持 `丢弃数据包`，没有回退直连。这属于测试
+网络环境限制（需要真实 root 网络或公网可达客户端），不是产品判定，也不改变本地版已取得的 Exit 数据面证据。
+
 **验收**：报告证明真实应用流量通过 Exit 可达目标，且测试后有明确清理结果。
 
 ### W12-08 吞吐、延迟、丢包与并发 `[x]`

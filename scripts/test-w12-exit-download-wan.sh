@@ -47,6 +47,17 @@ LAUNCHER_PID=""
 FORWARD_RULES_ADDED=0
 FORWARD_BEFORE="1"
 
+hk_feed() {
+    # Feed one command over stdin: no shell quoting, no argument-length limit.
+    local payload=$1
+    printf '%s' "$payload" | timeout 90 ssh -F /dev/null \
+        -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+        -o ServerAliveInterval=5 -o ServerAliveCountMax=2 \
+        -o ControlMaster=auto -o "ControlPath=$SSH_CONTROL" -o ControlPersist=600 \
+        -o "UserKnownHostsFile=$SSH_KNOWN_HOSTS" -i "$SSH_KEY" "root@$HK_HOST" \
+        "python3 '$HK_DIR/ipc_client.py' '$HK_DIR/run/node.sock' -"
+}
+
 info() { printf '[INFO] %s\n' "$*"; }
 fail() { printf '[FAIL] %s\n' "$*" >&2; exit 1; }
 
@@ -131,8 +142,9 @@ import socket
 import struct
 import sys
 
-socket_path, command_json = sys.argv[1:3]
-command = json.loads(command_json)
+socket_path = sys.argv[1]
+source = sys.argv[2]
+command = json.loads(sys.stdin.read() if source == "-" else source)
 request_id = 1
 PROTOCOL_VERSION = 5
 FRAME_HEADER = struct.Struct(">4sHBBI")
@@ -230,11 +242,11 @@ PYCLIENT
     expires_ms=$((now_ms + 3600000))
     command=$(jq -cn --arg n "$NET" --arg id "$owner_id" --argjson exp "$expires_ms" \
         '{command:"update_coordinator_candidates",payload:{network_name:$n,expected_revision:0,candidates:[{node_id:$id,priority:10}],expires_at_unix_ms:$exp}}')
-    hk "python3 '$HK_DIR/ipc_client.py' '$HK_DIR/run/node.sock' '$command'" >"$WORK/evidence/bootstrap-candidates.json" \
+    hk_feed "$command" >"$WORK/evidence/bootstrap-candidates.json" \
         || fail "bootstrap candidate configuration was rejected"
     command=$(jq -cn --arg n "$NET" --arg endpoint "10.7.53.243:$HS_PORT" \
-        '{command:"publish_coordinator_candidate_declaration",payload:{network_name:$n,willingness:"willing",public_reachability:{public_endpoint:$endpoint,reachable_via_relay:true},resources:{cpu_cores:2,memory_bytes:2147483648,max_connections:256},validity_ms:600000}}')
-    hk "python3 '$HK_DIR/ipc_client.py' '$HK_DIR/run/node.sock' '$command'" >"$WORK/evidence/bootstrap-declaration.json" \
+        '{command:"publish_coordinator_candidate_declaration",payload:{network_name:$n,willingness:"willing",public_reachability:{public_endpoint:$endpoint,reachable_via_relay:true},resources:{cpu_cores:2,memory_bytes:2147483648,max_connections:256},validity_ms:900000}}')
+    hk_feed "$command" >"$WORK/evidence/bootstrap-declaration.json" \
         || fail "bootstrap candidate declaration was rejected"
 
     info "enabling owner Exit capability on the Exit host"
@@ -245,8 +257,29 @@ PYCLIENT
     info "authorising the owner as an Exit Node for this network"
     command=$(jq -cn --arg n "$NET" \
         '{command:"set_network_role",payload:{network_name:$n,role:"exit_node",enabled:true}}')
-    hk "python3 '$HK_DIR/ipc_client.py' '$HK_DIR/run/node.sock' '$command'" >"$WORK/evidence/exit-role.json" \
+    hk_feed "$command" >"$WORK/evidence/exit-role.json" \
         || { hk "tail -40 '$HK_DIR/host.log'" >&2 || true; fail "authorising the Exit Node role was rejected"; }
+
+    info "applying the Exit contribution policy on the Exit Node"
+    local policy_view policy_revision local_revision now_ms expires_ms candidate
+    hk_feed '{"command":"get_policy"}' >"$WORK/evidence/host-policy-before.json" \
+        || fail "get_policy failed on the Exit host"
+    policy_revision=$(jq -r '.data.revision // 0' "$WORK/evidence/host-policy-before.json")
+    local_revision=$(( $(jq -r '.data.snapshot.local_policy.revision // 0' "$WORK/evidence/host-policy-before.json") + 1 ))
+    now_ms=$(date +%s%3N)
+    expires_ms=$((now_ms + 604800000))
+    candidate=$(jq -cn --arg owner "$owner_id" --argjson now "$now_ms" --argjson exp "$expires_ms" \
+        --argjson rev "$local_revision" \
+        '{local_policy:{node_id:$owner,revision:$rev,issued_at_unix_ms:$now,expires_at_unix_ms:$exp,
+           network_scope:{kind:"all"},contribution_vetoes:[],exit_contribution:{},relay_limits:{},rules:[]},
+          network_acls:[]}')
+    command=$(jq -cn --argjson cand "$candidate" --argjson rev "$policy_revision" \
+        '{command:"apply_policy",payload:{expected_revision:$rev,candidate:$cand,network_ids:[],
+           includes_local_policy:true,confirm_privilege_expansion:true}}')
+    hk_feed "$command" >"$WORK/evidence/host-policy-apply.json" 2>"$WORK/evidence/host-policy-apply.err" \
+        || { cat "$WORK/evidence/host-policy-apply.err" >&2 || true; fail "applying the Exit contribution policy failed"; }
+    jq -e '.data.revision >= 1' "$WORK/evidence/host-policy-apply.json" >/dev/null \
+        || fail "the Exit contribution policy did not apply"
 
     info "publishing the administrator Exit authorization directory"
     hk "cat '$HK_DIR/config/$NET/network.json'" >"$WORK/evidence/host-network-record.json" \
@@ -255,23 +288,42 @@ PYCLIENT
     profile_revision=$(jq -r '.revision' "$WORK/evidence/host-network-record.json")
     update_command=$(jq -cn --arg n "$NET" --argjson rev "$profile_revision" \
         --argjson up "$(jq -c '{purpose,icon,language,region,tags,capability_declarations,visibility,join_mode,
-            exit_contribution,exit_contribution_scope,exit_contribution_mode,
+            exit_contribution:"not_required",exit_contribution_scope:"not_applicable",
+            exit_contribution_mode:"autonomous",
             exit_selection_policy:{mode:{mode:"fixed",exit:.owner},default_exit:.owner,
               available_exits:[.owner],denied_exits:[],groups:[],members:[],
               session_transition:"fail_closed"}}' \
             "$WORK/evidence/host-network-record.json")" \
         '{command:"update_network_profile",payload:{network_name:$n,expected_revision:$rev,update:$up}}')
-    hk "python3 '$HK_DIR/ipc_client.py' '$HK_DIR/run/node.sock' '$update_command'" \
+    hk_feed "$update_command" \
         >"$WORK/evidence/exit-directory.json" 2>"$WORK/evidence/exit-directory.err" \
         || { cat "$WORK/evidence/exit-directory.err" "$WORK/evidence/exit-directory.json" >&2 || true; fail "the Exit authorization directory update was rejected"; }
     jq -e '.status == "network_profile_updated"' "$WORK/evidence/exit-directory.json" >/dev/null \
         || fail "the Exit authorization update did not apply"
 
+    info "acknowledging the reissued terms on the Exit host"
+    local ack_terms ack_id ack_command ack_done=0
+    for ((i = 0; i < 30; i++)); do
+        hk_feed '{"command":"get_snapshot"}' >"$WORK/evidence/host-terms.json" 2>/dev/null || true
+        if ! jq -e --arg n "$NET" '[.data.memberships[]? | select(.network_name==$n) | select(.policy_confirmation_required==true)] | length >= 1' \
+            "$WORK/evidence/host-terms.json" >/dev/null 2>&1; then
+            ack_done=1
+            break
+        fi
+        ack_id=$(jq -r --arg n "$NET" '[.data.memberships[]? | select(.network_name==$n)][0].network_id' "$WORK/evidence/host-terms.json")
+        ack_terms=$(jq -r --arg n "$NET" '[.data.memberships[]? | select(.network_name==$n)][0].current_terms_hash' "$WORK/evidence/host-terms.json")
+        ack_command=$(jq -cn --arg id "$ack_id" --arg hash "$ack_terms" --argjson now "$(date +%s%3N)" \
+            '{command:"acknowledge_membership_policy",payload:{network_id:$id,expected_terms_hash:$hash,
+               acknowledged_at_unix_ms:$now,exit_contribution_acknowledged:true}}')
+        hk_feed "$ack_command" >"$WORK/evidence/host-ack.json" 2>"$WORK/evidence/host-ack.err" || true
+        sleep 1
+    done
+    [ "$ack_done" = 1 ] || fail "the Exit host could not acknowledge the reissued policy terms"
+
     info "verifying the Exit Node is selectable before inviting the client"
     local selectable=0
     for ((i = 0; i < 30; i++)); do
-        if hk "python3 '$HK_DIR/ipc_client.py' '$HK_DIR/run/node.sock' '{\"command\":\"get_snapshot\"}'" \
-            >"$WORK/evidence/host-snapshot.json" 2>/dev/null; then
+        if hk_feed '{"command":"get_snapshot"}' >"$WORK/evidence/host-snapshot.json" 2>/dev/null; then
             if jq -e '[.data.exit_selections[]?.resolution.selectable_exits // []] | flatten | length >= 1' \
                 "$WORK/evidence/host-snapshot.json" >/dev/null 2>&1; then
                 selectable=1
@@ -285,8 +337,7 @@ PYCLIENT
     info "reading the Exit Node virtual address"
     local exit_v6=""
     for ((i = 0; i < 60; i++)); do
-        if hk "python3 '$HK_DIR/ipc_client.py' '$HK_DIR/run/node.sock' '{\"command\":\"get_snapshot\"}'" \
-            >"$WORK/evidence/host-snapshot.json" 2>/dev/null; then
+        if hk_feed '{"command":"get_snapshot"}' >"$WORK/evidence/host-snapshot.json" 2>/dev/null; then
             exit_v6=$(jq -r --arg n "$NET" '.data.networks[]? | select(.name==$n) | .assigned_ipv6 // empty' \
                 "$WORK/evidence/host-snapshot.json" | head -1)
             [ -n "$exit_v6" ] && break
@@ -299,7 +350,7 @@ PYCLIENT
     info "creating a single-use invitation"
     command=$(jq -cn --arg network "$network_id" \
         '{command:"create_invitation",payload:{network_id:$network,role:"member",capabilities:[],max_uses:1,expires_in_ms:3600000}}')
-    hk "python3 '$HK_DIR/ipc_client.py' '$HK_DIR/run/node.sock' '$command'" >"$WORK/evidence/invitation.json" \
+    hk_feed "$command" >"$WORK/evidence/invitation.json" \
         || fail "invitation creation was rejected"
     local invite_code invitation_id
     invite_code=$(jq -r '.data.code' "$WORK/evidence/invitation.json")
@@ -327,9 +378,12 @@ PYCLIENT
     iptables -A FORWARD -i "$WAN_IF" -o "$VH" -m state --state RELATED,ESTABLISHED -j ACCEPT
     iptables -t nat -A POSTROUTING -s 10.79.0.0/24 -o "$WAN_IF" -j MASQUERADE
     FORWARD_RULES_ADDED=1
-    ip netns exec "$NS" curl -sS --max-time 20 -o /dev/null -w '%{http_code}\n' https://www.cloudflare.com/ \
+    ip netns exec "$NS" curl -sS --max-time 60 -o /dev/null -w '%{http_code}\n' \
+        "https://speed.cloudflare.com/__down?bytes=65536" \
         >"$WORK/evidence/client-egress-baseline.txt" 2>&1 \
         || fail "client namespace has no internet egress before the tunnel"
+    grep -q '^200$' "$WORK/evidence/client-egress-baseline.txt" \
+        || fail "client namespace baseline download did not return HTTP 200"
     ip netns exec "$NS" curl -sS --max-time 20 https://ifconfig.me >"$WORK/evidence/client-egress-ip-before.txt" 2>/dev/null || true
 
     info "starting the client node inside the namespace"
@@ -397,6 +451,14 @@ SH
     local tun_name routing_status
     tun_name=$(jq -r --arg n "$NET" '.data.networks[]? | select(.name==$n) | .tun_name' "$WORK/evidence/client-snapshot.json" | head -1)
     [ -n "$tun_name" ] && [ "$tun_name" != null ] || fail "the client did not report a TUN device name"
+    info "refreshing the owner candidate declaration before the session starts"
+    command=$(jq -cn --arg n "$NET" --arg endpoint "10.7.53.243:$HS_PORT" \
+        '{command:"publish_coordinator_candidate_declaration",payload:{network_name:$n,willingness:"willing",
+           public_reachability:{public_endpoint:$endpoint,reachable_via_relay:true},
+           resources:{cpu_cores:2,memory_bytes:2147483648,max_connections:256},validity_ms:900000}}')
+    hk_feed "$command" >"$WORK/evidence/bootstrap-declaration-refresh.json" 2>&1 || true
+    sleep 3
+
     info "pointing the client routing at the Exit Node $exit_v6"
     command=$(jq -cn --arg n "$NET" --arg exit "$exit_v6" \
         '{command:"update_routing",payload:{network_name:$n,mode:"global_proxy",exit_node:$exit,is_exit_node:false}}')
@@ -433,18 +495,32 @@ SH
         >"$WORK/evidence/traffic-session-routed.json"
     info "routing summary: $(cat "$WORK/evidence/routing-summary.json")"
 
+    info "waiting for the Exit session to reach the protected state"
+    local protected=0
+    for ((i = 0; i < 150; i++)); do
+        ip netns exec "$NS" python3 "$WORK/ipc_client.py" "$client_sock" '{"command":"get_snapshot"}' \
+            >"$WORK/evidence/client-snapshot-protected.json" 2>/dev/null || true
+        if jq -e '.data.traffic_session.state == "protected"' "$WORK/evidence/client-snapshot-protected.json" >/dev/null 2>&1; then
+            protected=1
+            break
+        fi
+        sleep 1
+    done
+    [ "$protected" = 1 ] || { jq -c '.data.traffic_session' "$WORK/evidence/client-snapshot-protected.json" >&2 || true; fail "the Exit session never reached the protected state"; }
+    info "traffic session: $(jq -c '.data.traffic_session | {state,reason_code}' "$WORK/evidence/client-snapshot-protected.json")"
+
     info "verifying the Exit path is selected and protected"
     jq -c '.data.exit_selections[]?' "$WORK/evidence/client-snapshot.json" >"$WORK/evidence/exit-selections.json" || true
     jq -c '.data.traffic_session' "$WORK/evidence/client-snapshot.json" >"$WORK/evidence/traffic-session.json"
     info "client exit policy: $(jq -c '.resolution.mode' "$WORK/evidence/exit-selections.json" 2>/dev/null || echo unknown)"
 
     info "capturing the tunnel while the download runs"
-    ip netns exec "$NS" timeout 240 tcpdump -ni "$tun_name" -nn -c 20000 'tcp or udp' \
+    ip netns exec "$NS" timeout 700 tcpdump -ni "$tun_name" -nn -c 20000 'tcp or udp' \
         >"$WORK/evidence/tun-download.pcap.txt" 2>"$WORK/evidence/tun-download.tcpdump.err" &
     local tcpdump_pid=$!
 
     info "downloading $DOWNLOAD_BYTES bytes through the Exit with curl"
-    ip netns exec "$NS" curl -sS --max-time 180 -o "$WORK/evidence/download.bin" \
+    ip netns exec "$NS" curl -4 -sS --max-time 600 -o "$WORK/evidence/download.bin" \
         -w '{"http_code":%{http_code},"size_download":%{size_download},"speed":%{speed_download},"remote_ip":"%{remote_ip}"}\n' \
         "https://speed.cloudflare.com/__down?bytes=$DOWNLOAD_BYTES" >"$WORK/evidence/download.json" \
         || fail "the non-browser download through the Exit failed"

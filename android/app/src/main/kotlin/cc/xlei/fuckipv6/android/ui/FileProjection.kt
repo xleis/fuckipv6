@@ -1,5 +1,7 @@
 package cc.xlei.fuckipv6.android.ui
 
+import cc.xlei.fuckipv6.android.bridge.FileCapabilityView
+import cc.xlei.fuckipv6.android.bridge.NetworkLabel
 import cc.xlei.fuckipv6.contract.NodeContractV1.NodeFileCapabilitySnapshot
 import cc.xlei.fuckipv6.contract.NodeContractV1.NodeNetworkMembershipSnapshot
 
@@ -85,6 +87,47 @@ data class FilePageData(
                 transferSurfaceKey = TRANSFER_SURFACE_KEY,
             )
         }
+
+        fun from(
+            capability: FileCapabilityView?,
+            networks: List<NetworkLabel>,
+        ): FilePageData = from(
+            capability = capability?.let {
+                NodeFileCapabilitySnapshot(
+                    it.accessEpoch,
+                    it.activeTransfers,
+                    it.availableBytes,
+                    it.networkId,
+                    it.rootError,
+                    it.shareRevision,
+                    it.state,
+                )
+            },
+            memberships = networks.map { label ->
+                NodeNetworkMembershipSnapshot(
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    label.networkId,
+                    label.networkName,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                )
+            },
+        )
 
         /**
          * Keep only a stable machine-readable code. Owner-local errors can carry

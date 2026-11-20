@@ -4090,6 +4090,11 @@ debug 测试构建；命令为
   只覆盖 Linux 本地文件系统和 debug 测试构建。
 - 2026-11-20 Android 侧证据：`FileProjectionTest` 7 项与既有 Android 单测共 19 项通过，`:app:lintDebug`、`:app:assembleDebug`
   通过；同时修复了 `NodeSnapshot` 构造缺少 `file_capability` 参数导致既有 Android 单测编译失败的问题（该问题在 `main` 上已存在）。
+- 2026-11-20 Android 只读节点桥接：`bridge/NodeApiConfig`、`bridge/HttpSnapshotSource`、`bridge/SnapshotJsonParser` 和
+  `bridge/NodeBridge` 让 Android 直接消费 `GET /api/v1/snapshot` 的 `file_capability`/`memberships`/`revision`，以 5 秒轮询发布
+  `NotConfigured/Ready/Failed`；未配置节点地址时显示不可用而不是猜测地址，401/403、非 200、连接失败和不可解析响应分别失败关闭，
+  失败后不会把上一次快照当作当前状态。新增 `NodeBridgeTest` 7 项与 `SnapshotJsonParserTest` 6 项，Android 单测共 32 项通过。
+  该桥接是只读的：没有命令通道、没有传输动作，Android File 的浏览/上传/下载与 SAF 仍属于 W16。
 - 因此 W15 保持 `[~]`，第二版能力队列中的“W15 File 完成”继续保持 `[ ]`；真实路径安全、跨平台和三端门禁通过前不得发布为完成。
 
 ## 19. W16：Android
@@ -4108,6 +4113,14 @@ debug 测试构建；命令为
 - [ ] 不展示桌面专用但 Android 不支持的操作。
 
 **验收**：Android 是同一产品的平台实现，不是独立概念或静态展示应用。
+
+**补充（2026-11-20，只读节点桥接）**：Android 现在有最小节点桥接层，可直接消费 `GET /api/v1/snapshot`：`NodeApiConfig`
+要求显式 `http(s)` 地址（模拟器可用 `10.0.2.2`，没有默认值），`HttpSnapshotSource` 使用可选 Bearer token、禁止跟随重定向，
+把 401/403、非 200、连接失败和不可解析响应分别映射为 `bridge.error.*` 并复用既有 `state.*` 文案；`SnapshotJsonParser` 只读取
+`file_capability`/`memberships`/`revision`，缺失能力保持缺失、解析失败失败关闭；`NodeBridge` 以 5 秒轮询发布
+`NotConfigured/Ready/Failed` 且失败后不保留“当前”快照。`MainActivity` 从 Intent extra 或本地偏好读取节点地址与 token，并在
+销毁时取消轮询。当前 `files` 页面已可展示真实能力状态；命令通道（成员/策略/角色等写入）、传输动作、VpnService 与 SAF 仍未实现，
+因此 W16-01 保持 `[ ]`。
 
 ### W16-02 前台 VpnService 生命周期 `[ ]`
 

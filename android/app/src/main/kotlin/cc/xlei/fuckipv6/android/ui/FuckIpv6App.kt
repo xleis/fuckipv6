@@ -50,6 +50,7 @@ fun FuckIpv6App(
     coordinator: CoordinatorPageData? = null,
     adminRecovery: AdminRecoveryPageData? = null,
     files: FilePageData? = null,
+    filesFailureKey: String? = null,
 ) {
     val systemLocale = LocalLocale.current.platformLocale
     val initialModule = contracts.navigation.modules.first()
@@ -129,6 +130,7 @@ fun FuckIpv6App(
                 coordinator = coordinator,
                 adminRecovery = adminRecovery,
                 files = files,
+                filesFailureKey = filesFailureKey,
             )
         }
     }
@@ -157,6 +159,7 @@ fun PageContent(
     coordinator: CoordinatorPageData? = null,
     adminRecovery: AdminRecoveryPageData? = null,
     files: FilePageData? = null,
+    filesFailureKey: String? = null,
 ) {
     Column(
         modifier = modifier
@@ -190,6 +193,12 @@ fun PageContent(
                 }
             pageId == "files" && files != null ->
                 FilePageContent(contracts = contracts, locale = locale, data = files)
+            pageId == "files" && filesFailureKey != null ->
+                SurfaceNotice(
+                    state = SurfaceState(SurfaceStatus.CONTROL_UNAVAILABLE, detailKeyOverride = filesFailureKey),
+                    locale = locale,
+                    contracts = contracts,
+                )
             pageId == "relay" && relay != null && relay.backendAvailable ->
                 RelayPageContent(contracts = contracts, locale = locale, data = relay)
             else -> SurfaceNotice(state = state, locale = locale, contracts = contracts)

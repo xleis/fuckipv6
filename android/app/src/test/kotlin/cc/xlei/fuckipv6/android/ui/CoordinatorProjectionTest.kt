@@ -165,6 +165,7 @@ private fun coordinatorSnapshot(status: CoordinatorCandidateStatus?): NodeSnapsh
         null,
         null,
         null,
+        null,
         emptyList(),
         emptyList(),
         null,

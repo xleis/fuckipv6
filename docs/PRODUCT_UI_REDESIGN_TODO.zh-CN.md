@@ -4082,9 +4082,14 @@ debug 测试构建；命令为
   重启、journal/staging 续传，以及四槽满载时三个独立控制面的响应和取消后资源回退；这仍不是 Windows/macOS 实机、跨平台竞态
   或跨平台满载隔离证据。
 - 当前 GPUI 与 WebUI 均已具备 File 目录浏览、目标选择、上传、下载、状态轮询和暂停/恢复/取消；GPUI 还提供在线成员目标投影、
-  目录分页与代际隔离。Android 仍仅同步导航契约且尚无 SAF/File 内容表面，不得宣称三端 File 语义已经一致。
+  目录分页与代际隔离。Android 现在消费同一 `NodeFileCapabilitySnapshot`：`FilePageData` 投影能力状态（未知线上值失败关闭为
+  `status.capability.unknown`）、绑定网络名、活动传输数、剩余空间、access epoch、share revision 与收敛后的根错误码，
+  `files` 页面只读展示并复用既有 `file.page.local_state.*` 文案；owner 本地错误中的主机路径被收敛为稳定码，不进入 UI。
+  Android 没有节点桥接，因此该页面不提供浏览/上传/下载动作，传输面与 SAF 仍属 W16，不得宣称三端 File 传输语义已经一致。
 - 自动化测试仍缺 Windows GNU/macOS 实机重解析点、硬链接、目录交换、并发重命名和权限变化验收；已有的大文件/多文件性能基线
   只覆盖 Linux 本地文件系统和 debug 测试构建。
+- 2026-11-20 Android 侧证据：`FileProjectionTest` 7 项与既有 Android 单测共 19 项通过，`:app:lintDebug`、`:app:assembleDebug`
+  通过；同时修复了 `NodeSnapshot` 构造缺少 `file_capability` 参数导致既有 Android 单测编译失败的问题（该问题在 `main` 上已存在）。
 - 因此 W15 保持 `[~]`，第二版能力队列中的“W15 File 完成”继续保持 `[ ]`；真实路径安全、跨平台和三端门禁通过前不得发布为完成。
 
 ## 19. W16：Android

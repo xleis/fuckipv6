@@ -49,6 +49,7 @@ fun FuckIpv6App(
     relay: RelayPageData? = null,
     coordinator: CoordinatorPageData? = null,
     adminRecovery: AdminRecoveryPageData? = null,
+    files: FilePageData? = null,
 ) {
     val systemLocale = LocalLocale.current.platformLocale
     val initialModule = contracts.navigation.modules.first()
@@ -127,6 +128,7 @@ fun FuckIpv6App(
                 relay = relay,
                 coordinator = coordinator,
                 adminRecovery = adminRecovery,
+                files = files,
             )
         }
     }
@@ -154,6 +156,7 @@ fun PageContent(
     relay: RelayPageData? = null,
     coordinator: CoordinatorPageData? = null,
     adminRecovery: AdminRecoveryPageData? = null,
+    files: FilePageData? = null,
 ) {
     Column(
         modifier = modifier
@@ -185,6 +188,8 @@ fun PageContent(
                         )
                     }
                 }
+            pageId == "files" && files != null ->
+                FilePageContent(contracts = contracts, locale = locale, data = files)
             pageId == "relay" && relay != null && relay.backendAvailable ->
                 RelayPageContent(contracts = contracts, locale = locale, data = relay)
             else -> SurfaceNotice(state = state, locale = locale, contracts = contracts)

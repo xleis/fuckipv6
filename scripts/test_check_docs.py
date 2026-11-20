@@ -134,6 +134,63 @@ class CheckDocsTests(unittest.TestCase):
             "premature-completion", {issue["code"] for issue in result["issues"]}
         )
 
+    def write_status_document(self, board: str, body: str) -> None:
+        path = self.root / DOCS.STATUS_TODO
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "## 1. 总进度看板\n\n"
+            "| 工作包 | 状态 |\n"
+            "|---|---|\n"
+            f"{board}\n\n"
+            "## 4. W1：契约\n\n"
+            f"{body}\n",
+            encoding="utf-8",
+        )
+
+    def status_codes(self) -> set[str]:
+        result = DOCS.check_documents(self.root, self.files())
+        return {issue["code"] for issue in result["issues"]}
+
+    def test_consistent_task_and_board_status_pass(self) -> None:
+        self.write_status_document(
+            "| W1 契约 | `[x]` |",
+            "### W1-01 任务甲 `[x]`\n\n- [x] 子项；\n",
+        )
+
+        self.assertEqual(self.status_codes(), set())
+
+    def test_complete_heading_with_unchecked_item_fails(self) -> None:
+        self.write_status_document(
+            "| W1 契约 | `[x]` |",
+            "### W1-01 任务甲 `[x]`\n\n- [x] 子项；\n- [ ] 未完成子项；\n",
+        )
+
+        self.assertIn("status-ahead-of-items", self.status_codes())
+
+    def test_unstarted_heading_with_all_items_checked_fails(self) -> None:
+        self.write_status_document(
+            "| W1 契约 | `[ ]` |",
+            "### W1-01 任务甲 `[ ]`\n\n- [x] 子项；\n",
+        )
+
+        self.assertIn("status-behind-items", self.status_codes())
+
+    def test_partial_heading_without_open_item_fails(self) -> None:
+        self.write_status_document(
+            "| W1 契约 | `[~]` |",
+            "### W1-01 任务甲 `[~]`\n\n- [x] 子项；\n",
+        )
+
+        self.assertIn("partial-status-without-open-item", self.status_codes())
+
+    def test_board_status_must_agree_with_items(self) -> None:
+        self.write_status_document(
+            "| W1 契约 | `[~]` |",
+            "### W1-01 任务甲 `[x]`\n\n- [x] 子项；\n",
+        )
+
+        self.assertIn("board-status-mismatch", self.status_codes())
+
     def test_cli_writes_machine_readable_report(self) -> None:
         output = self.root / "docs-report.json"
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(

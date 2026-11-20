@@ -56,6 +56,11 @@ SECURITY_INVARIANTS = (
 )
 
 
+STATUS_TODO = Path("docs/PRODUCT_UI_REDESIGN_TODO.zh-CN.md")
+PACKAGE_TASK_HEADING = re.compile(r"^### (W\d+-\d+)\b[^\[]*\[([ x~])\]")
+PACKAGE_BOARD_ROW = re.compile(r"^\|\s*(W\d+)\s[^|]*\|\s*`\[([ x~])\]`")
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -320,12 +325,144 @@ def check_execution_status(root: Path) -> list[dict[str, Any]]:
     return issues
 
 
+def _package_items(text: str) -> dict[str, list[tuple[int, str]]]:
+    """Map each W task heading to the top-level checkbox states that follow it."""
+    items: dict[str, list[tuple[int, str]]] = {}
+    current: str | None = None
+    for number, line in enumerate(text.splitlines(), start=1):
+        if line.startswith("## "):
+            current = None
+            continue
+        heading = PACKAGE_TASK_HEADING.match(line)
+        if heading:
+            current = heading.group(1)
+            items.setdefault(current, [])
+            continue
+        if line.startswith("### "):
+            current = None
+            continue
+        if current is None:
+            continue
+        checkbox = re.match(r"^- \[([ x~])\]", line)
+        if checkbox:
+            items[current].append((number, checkbox.group(1)))
+    return items
+
+
+def _expected_package_status(states: list[str]) -> str:
+    if not states:
+        return " "
+    if all(state == "x" for state in states):
+        return "x"
+    if any(state == "x" for state in states):
+        return "~"
+    return " "
+
+
+def _check_board_consistency(
+    lines: list[str], items: dict[str, list[tuple[int, str]]]
+) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    in_board = False
+    for number, line in enumerate(lines, start=1):
+        if line.startswith("## "):
+            in_board = "总进度看板" in line
+            continue
+        if not in_board:
+            continue
+        board = PACKAGE_BOARD_ROW.match(line)
+        if not board:
+            continue
+        package, status = board.group(1), board.group(2)
+        states = [
+            state
+            for task, entries in items.items()
+            if task.startswith(f"{package}-")
+            for _, state in entries
+        ]
+        expected = _expected_package_status(states)
+        if expected != status:
+            issues.append(
+                _issue(
+                    "board-status-mismatch",
+                    STATUS_TODO,
+                    number,
+                    f"{package} board status [{status}] disagrees with its items [{expected}]",
+                )
+            )
+    return issues
+
+
+def check_series_status(root: Path) -> list[dict[str, Any]]:
+    """Keep every task heading's status equal to its own checklist.
+
+    A heading marked complete must not own unchecked items, and a heading that
+    still reads as not started must not own a fully checked checklist. A
+    partially complete heading may mix both, which is what `[~]` means. The
+    progress board must then agree with the items it summarises, so the
+    machine-readable status cannot drift away from the checklist again.
+    """
+    path = root / STATUS_TODO
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    lines = text.splitlines()
+    items = _package_items(text)
+    issues: list[dict[str, Any]] = []
+    for number, line in enumerate(lines, start=1):
+        heading = PACKAGE_TASK_HEADING.match(line)
+        if not heading:
+            continue
+        task, status = heading.group(1), heading.group(2)
+        entries = items.get(task, [])
+        if not entries:
+            continue
+        unchecked = [position for position, state in entries if state != "x"]
+        if status == "x" and unchecked:
+            issues.append(
+                _issue(
+                    "status-ahead-of-items",
+                    STATUS_TODO,
+                    number,
+                    f"{task} is marked complete while {len(unchecked)} of {len(entries)} "
+                    f"item(s) are unchecked, first at line {unchecked[0]}",
+                )
+            )
+        elif status == " " and not unchecked:
+            issues.append(
+                _issue(
+                    "status-behind-items",
+                    STATUS_TODO,
+                    number,
+                    f"{task} is marked not started while all {len(entries)} item(s) are checked",
+                )
+            )
+        elif status == "~" and not unchecked:
+            issues.append(
+                _issue(
+                    "partial-status-without-open-item",
+                    STATUS_TODO,
+                    number,
+                    f"{task} claims remaining work while all {len(entries)} item(s) are checked; "
+                    "record the remaining acceptance as an unchecked item or mark the task complete",
+                )
+            )
+    issues.extend(_check_board_consistency(lines, items))
+    return issues
+
+
 def check_documents(root: Path, files: list[Path] | None = None) -> dict[str, Any]:
     root = root.resolve()
     markdown_files = files if files is not None else tracked_markdown_files(root)
     markdown_files = [path.resolve() for path in markdown_files]
     link_count, link_issues = check_links(root, markdown_files)
-    issues = [*link_issues, *check_security_invariants(root), *check_execution_status(root)]
+    issues = [
+        *link_issues,
+        *check_security_invariants(root),
+        *check_execution_status(root),
+        *check_series_status(root),
+    ]
     return {
         "schema": REPORT_SCHEMA,
         "schema_version": SCHEMA_VERSION,

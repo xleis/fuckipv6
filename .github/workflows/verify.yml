@@ -281,10 +281,12 @@ jobs:
         with:
           targets: x86_64-unknown-linux-musl,x86_64-pc-windows-gnu
 
-      - name: Install MinGW
+      - name: Install cross toolchains
         run: >-
           sudo apt-get update &&
-          sudo apt-get install -y mingw-w64 libfontconfig1-dev libfreetype-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev pkg-config
+          sudo apt-get install -y mingw-w64 musl-tools
+          libfontconfig1-dev libfreetype-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev pkg-config &&
+          sudo ln -sf /usr/bin/musl-gcc /usr/local/bin/x86_64-linux-musl-gcc
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

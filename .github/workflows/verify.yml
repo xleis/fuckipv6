@@ -370,10 +370,56 @@ jobs:
           path: target/release-gate
           if-no-files-found: warn
 
+  android:
+    name: Android gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install Android SDK packages
+        uses: android-actions/setup-android@v3
+        with:
+          packages: >-
+            platforms;android-36
+            build-tools;36.0.0
+            platform-tools
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+
+      - name: Unit tests, lint and debug build
+        working-directory: android
+        run: >-
+          ./gradlew --console=plain --no-daemon
+          :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
+
+      - name: Upload test and lint reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-gate-reports
+          path: |
+            android/app/build/reports
+            android/app/build/test-results
+          if-no-files-found: warn
+
   aggregate:
     name: Aggregate release decision
     if: always()
-    needs: [docs, contracts, supply-chain, api-security, gpui-smoke, visual-regression, linux, windows, macos]
+    needs: [docs, contracts, supply-chain, api-security, gpui-smoke, visual-regression, android, linux, windows, macos]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -400,6 +446,7 @@ jobs:
             --upstream-result "api-security=${{ needs.api-security.result }}" \
             --upstream-result "gpui-smoke=${{ needs.gpui-smoke.result }}" \
             --upstream-result "visual-regression=${{ needs.visual-regression.result }}" \
+            --upstream-result "android=${{ needs.android.result }}" \
             --upstream-result "linux=${{ needs.linux.result }}" \
             --upstream-result "windows=${{ needs.windows.result }}" \
             --upstream-result "macos=${{ needs.macos.result }}"

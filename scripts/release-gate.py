@@ -86,6 +86,7 @@ UPSTREAM_JOBS = (
     "supply-chain",
     "api-security",
     "gpui-smoke",
+    "android",
     "linux",
     "windows",
     "macos",

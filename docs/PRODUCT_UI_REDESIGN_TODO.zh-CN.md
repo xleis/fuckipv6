@@ -4208,6 +4208,11 @@ debug 测试构建；命令为
 
 ### W16-01 Compose 五模块与共享契约 `[ ]`
 
+> 补充（2026-11-21，CI 门禁）：`verify.yml` 新增 `android` job（JDK 21、`platforms;android-36`、`build-tools;36.0.0`、Gradle 缓存），
+> 运行 `:app:testDebugUnitTest :app:lintDebug :app:assembleDebug` 并上传报告；`android` 同时进入 `aggregate` 的 `needs`/
+> `--upstream-result` 和 `release-gate.py` 的 `UPSTREAM_JOBS`，缺失或失败都会让聚合门禁失败关闭。Android 侧此前完全没有 CI 覆盖，
+> 现在本机按同一命令实跑通过（148 项单测 + lint + debug 构建）。
+
 - [ ] 实现概览、节点、网络、活动、设置五模块；
 - [ ] 使用生成/共享的 Node/Network/Operation/Error 契约；
 - [ ] 术语、状态优先级和危险操作语义与桌面一致；

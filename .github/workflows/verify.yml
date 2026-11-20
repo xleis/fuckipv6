@@ -213,7 +213,7 @@ jobs:
           xvfb libvulkan1 mesa-vulkan-drivers
           libxcb1 libxcb-xkb1 libxkbcommon0 libxkbcommon-x11-0
           libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
-          libfontconfig1-dev libfreetype-dev pkg-config
+          libfontconfig1-dev libfreetype-dev pkg-config xdotool
 
       - name: Build native node binary
         run: cargo build -p fuckipv6-client

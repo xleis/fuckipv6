@@ -58,7 +58,7 @@
 | W9 成员、组与拓扑 | `[~]` | P1 | W8 | 成员列表、邀请审批、组目录和拓扑聚合已完成；多网络视觉、交互、性能与 E2E 进行中 |
 | W10 安全与隐私 | `[x]` | P1 | W9 | 权限模型与矩阵、ACL/拒绝优先/本地否决、字段级隐私、策略编辑器与测试器、差异预览/原子应用/回滚、权威活动时间线、可验证长期审计、安全页面状态和可重复治理证据闭环均已完成 |
 | W11 流量路由 | `[~]` | P1 | W7,W10 | W11-01 四类决策与首条命中、W11-02 匹配条件、W11-03 应用身份与子进程继承、W11-04 未知应用与失败策略、W11-05 规则测试器领域契约、W11-06 原子应用/差异/回滚/崩溃恢复、W11-07 有界自动恢复协调器契约和 W11-09 隔离路由 E2E/失败关闭/网络报告已完成；W11-08 WebUI 已接入同一权威页面的结构化编辑、测试、应用、历史和回滚入口，GPUI 已接入同一页面的权威投影、规则/目标/影响展示和精确跳转，真实命中观测、GPUI/WebUI/Android 三端一致、生产后端接线及真实平台监听/适配待完成 |
-| W12 Exit | `[~]` | P1 | W10,W11 | W12-01 至 W12-05、W12-08 和 W12-10 已完成：本机启停、贡献治理、管理员选择、分层健康、故障切换/撤权及 Exit 页面权威分层均有自动化证据；W12-06 已完成真实 Chrome DNS、IPv4/IPv6 受控/外部探测与失败关闭复核，IPv6 外部目标仍为 `not_tested` 且保持 `fail_closed_required=true`；W12-07 已验证 Google/YouTube 页面、实际视频播放、DNS/TLS/H2/H3 和 TUN 源路径，但 yt-dlp 媒体下载仍 403；W12-08 已完成香港 Exit 对直连基线的 DNS/RTT/TCP/TLS/H3、单流吞吐和并发实测，并定位瓶颈到香港 co-located Relay/Exit 数据路径；独立 netns 已通过正式邀请入网后的双向 P2P ICMP 与直接 UDP 路径，真实香港节点随后完成 IPv4/IPv6 双向 ICMP、TCP 262144 字节、UDP 65536 字节/64 包和精确路由验收，并通过真实增量证明 IPv4 目标流量归入规范 IPv6 Peer 身份且两侧 Peer/网络级 P2P 计数一致；W12-07 的非浏览器完整文件下载与自动 DNS 清理、两侧 Exit 可达和 W12-09 的 24 小时稳定性仍待完成；2026-11-16 补充香港主机的双 control/TUN/日志残留审计与清理、稳态探测与重启预算修复；2026-11-20 修复全新网络无法进入 online 的候选治理启动边界（bootstrap 恢复投影、客户端冻结条件、候选配置与 owner 声明 bootstrap），W12-09 干扰注入矩阵 8 例通过、1 例因产品无 QUIC→TCP 降级而跳过；W12-07 的真实 WAN Exit 下载仍被"无可授权的 Exit 目录项"阻塞，客户端按失败关闭丢弃代理流量而未静默直连 |
+| W12 Exit | `[~]` | P1 | W10,W11 | W12-01 至 W12-05、W12-08 和 W12-10 已完成：本机启停、贡献治理、管理员选择、分层健康、故障切换/撤权及 Exit 页面权威分层均有自动化证据；W12-06 已完成真实 Chrome DNS、IPv4/IPv6 受控/外部探测与失败关闭复核，IPv6 外部目标仍为 `not_tested` 且保持 `fail_closed_required=true`；W12-07 已验证 Google/YouTube 页面、实际视频播放、DNS/TLS/H2/H3 和 TUN 源路径，但 yt-dlp 媒体下载仍 403；W12-08 已完成香港 Exit 对直连基线的 DNS/RTT/TCP/TLS/H3、单流吞吐和并发实测，并定位瓶颈到香港 co-located Relay/Exit 数据路径；独立 netns 已通过正式邀请入网后的双向 P2P ICMP 与直接 UDP 路径，真实香港节点随后完成 IPv4/IPv6 双向 ICMP、TCP 262144 字节、UDP 65536 字节/64 包和精确路由验收，并通过真实增量证明 IPv4 目标流量归入规范 IPv6 Peer 身份且两侧 Peer/网络级 P2P 计数一致；W12-07 的非浏览器完整文件下载与自动 DNS 清理、两侧 Exit 可达和 W12-09 的 24 小时稳定性仍待完成；2026-11-16 补充香港主机的双 control/TUN/日志残留审计与清理、稳态探测与重启预算修复；2026-11-20 修复全新网络无法进入 online 的候选治理启动边界（bootstrap 恢复投影、客户端冻结条件、候选配置与 owner 声明 bootstrap），W12-09 干扰注入矩阵 8 例通过、1 例因产品无 QUIC→TCP 降级而跳过；W12-07 的真实 WAN Exit 下载现被"Exit 侧未发布贡献策略（`exit.contribution.policy_unavailable`）"阻塞（授权目录本身已可用），客户端保持失败关闭；W12-09 已启动 24 小时浸泡（三 netns 邀请拓扑、60 秒周期、300 秒 TCP canary、RSS/FD/临时文件采样，cycle 7 全绿） |
 | W13 Relay | `[x]` | P1 | W10 | W13-01 至 W13-07 已完成：独立热启停、intent 持久化、稳定失败原因码、双侧签名授权、拒绝优先、实时撤权、既有会话策略、owner-only 治理审计和 durable audit 导出均有自动化证据；真实 Relay 子进程运营者导出只含最小 usage/health/governance 字段，不包含载荷、虚拟地址、密钥或显示名；生产数据面故障转移写入同一 owner audit 链并合并到活动快照，临时 Coordinator Relay 冻结检查已覆盖。Linux 单 Relay 进程 SIGKILL/重启后的端口复用、旧会话不可接管和新证书恢复、真实子进程连接风暴/慢连接/资源上限/吞吐/延迟/CPU/RSS、满载期间 Snapshot/Manifest 可用性及 Relay/Coordinator/Exit 同时故障恢复均有进程或 netns 证据。GPUI、WebUI 与 Android Compose Relay 页面现统一消费共享 Manifest、`NodeSnapshot`、健康/治理投影和 `SetNetworkRole` 命令；Android 在快照或真实命令回调缺失时失败关闭，不注入示例状态。Android 的 VpnService、节点 IPC 和真机 E2E 仍归 W16，不在本项冒充平台数据面完成 |
 | W14 Coordinator 接管 | `[x]` | P1 | W10,W12,W13 | W14-01 至 W14-10 全部完成：候选组与签名声明、任期/租约/fencing、严格多数接管、分区无多数保护、旧 Leader 只读恢复、紧急临时 Leader、临时权限冻结、管理员阈值恢复、数据面连续性以及脑裂/断电/netns 故障演练均有自动化与真实进程证据；有界穷举交错扫描、真实多进程 SIGKILL/SIGSTOP 矩阵、QEMU 断电与多节点离线 Trustee 恢复演练补齐了残余路径 |
 | W15 File | `[~]` | P2 | W10 | 本地 domain/ACL/路径/临时文件/续传适配器、GPUI owner 设置与 IPC、GPUI/WebUI File 目录浏览/目标选择/上传下载/分页/暂停恢复/取消、并发/速率/磁盘/扫描/审计上界已落地；Linux 独立三节点真实网络传输、恢复与四槽满载控制面隔离验收已完成，Android File 表面/SAF、Windows/macOS 实机路径安全与传输竞态、跨平台验收及 OS/性能资源基线仍未完成 |
@@ -2834,6 +2834,17 @@ Coordinator/Exit（`--is-exit-node`、`exit enable`、`set_network_role role=exi
 本机侧清理（`stop_networks` 后 TUN、路由、resolver 恢复，宿主 `ip rule`/默认路由不变）已在 W12-09 的
 干扰矩阵中验证；WAN 脚本同一位置的断言本轮未执行到，不计为通过。
 
+**2026-11-20 追加：Exit 授权链路的下一道门**。管理员 Exit 授权目录本身已经可用：
+`update_network_profile` 写入 `exit_selection_policy = {mode: fixed, available_exits: [owner]}` 并配合
+`set_network_role role=exit_node` 后，成员快照的 `resolution.selectable_exits` 变为非空（`exit.selection.available`）。
+但成员把默认路由指入 TUN 后，Exit 侧对 readiness 探测仍以
+`exit.contribution.policy_unavailable` 拒绝（`client=node_…`），客户端日志为
+`Exit Node 拒绝未通过贡献治理授权的 readiness 探测`，代理策略路由保持"等待 Exit 验证后启用"、数据包按失败关闭丢弃。
+根因是网络创建时使用 `exit_contribution=not_required / scope=not_applicable / mode=disabled`，Exit 侧没有
+owner 签名的贡献策略文档（运行时 `policy: None`），因此贡献授权判定直接判不可用。下一步需要发布 owner 签名的
+Exit 贡献策略（W12-02 的贡献治理）后再复跑 `scripts/test-w12-exit-local-netns.sh` 与
+`scripts/test-w12-exit-download-wan.sh`；在此之前本项保持 `[~]`，不以"已选定 Exit"冒充"流量已过 Exit"。
+
 **验收**：报告证明真实应用流量通过 Exit 可达目标，且测试后有明确清理结果。
 
 ### W12-08 吞吐、延迟、丢包与并发 `[x]`
@@ -3115,6 +3126,15 @@ ICMP 5/5、TCP 262144 字节、UDP 64 包、虚拟 MTU 1280 边界）。逐例�
 证据目录：`/tmp/w12-interference.20261120T0*`（含 `cases.jsonl`、每例 summary、日志与 pcap），基线验收
 `/tmp/w12-p2p-invite.20261120T011008Z.1076465`。矩阵只覆盖该拓扑与本次时段；QUIC 降级未实现、24 小时浸泡仍
 未执行，因此本项继续保持 `[ ]`。
+
+**2026-11-20 24 小时浸泡启动**：新增 `scripts/test-w12-soak-netns.sh`，并在无 root 环境下用
+`scripts/w12-rootless-netns.sh`（非特权 user namespace + 挂载/网络命名空间 + slirp4netns 上行）运行。浸泡拓扑为
+三 netns 正式邀请入网（Coordinator 与两个成员，direct P2P），每周期采集：双方 peer 健康与 P2P 计数/错误数、
+双向 5 包 ICMP、每 300 秒 TCP 65536 字节 canary、节点与控制进程 RSS/FD、runtime 临时文件计数；输出
+`soak/metrics.jsonl`、`soak/events.jsonl`、`soak/run-state.json`，结束时写 `soak/summary.json`。
+本实例于 2026-11-20T10:34Z 启动（`W12_SOAK_WORK=/tmp/w12-soak-24h`，24 小时、60 秒周期、300 秒 canary），
+cycle 7 时双向 P2P 均 healthy、ICMP 5/5、canary 12/12 通过、RSS/FD 采样正常；短周期预演（12 周期）verdict=ok。
+只有满 24 小时、`summary.verdict == "ok"`、无 peer/ICMP/canary 失败且 RSS/FD/临时文件无持续增长时，才勾选本项。
 
 **验收**：没有 24 小时稳定性与多场景证据时，不得给出“抗干扰强”或“长期可用”结论。
 

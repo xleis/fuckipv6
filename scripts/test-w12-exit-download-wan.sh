@@ -25,6 +25,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$ROOT/target/x86_64-unknown-linux-musl/release/fuckipv6"
 HK_HOST="${W12_HK_HOST:-101.36.116.21}"
 SSH_KEY="${W12_SSH_KEY:-/home/xlei/.ssh/id_ed25519}"
+# Per-run control socket: a stale master from a killed run otherwise blocks every
+# later SSH call with a dead socket path.
+SSH_CONTROL="${W12_SSH_CONTROL:-/tmp/w12-ssh-control-$$-%h-%p-%r.sock}"
 SSH_KNOWN_HOSTS="${W12_SSH_KNOWN_HOSTS:-/home/xlei/.ssh/known_hosts}"
 NET="${W12_NET:-w12-e7wan}"
 HS_PORT="${W12_HOST_PORT:-29766}"
@@ -48,7 +51,12 @@ info() { printf '[INFO] %s\n' "$*"; }
 fail() { printf '[FAIL] %s\n' "$*" >&2; exit 1; }
 
 hk() {
-    ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+    # A single multiplexed connection keeps the dozens of probes fast and keeps
+    # us clear of sshd's MaxStartups limit while the host is under brute-force
+    # noise.
+    timeout 60 ssh -F /dev/null -n -o BatchMode=yes -o StrictHostKeyChecking=no \
+        -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 \
+        -o ControlMaster=auto -o "ControlPath=$SSH_CONTROL" -o ControlPersist=600 \
         -o "UserKnownHostsFile=$SSH_KNOWN_HOSTS" -i "$SSH_KEY" "root@$HK_HOST" "$@"
 }
 
@@ -79,6 +87,8 @@ cleanup() {
         iptables -t nat -D POSTROUTING -s 10.79.0.0/24 -o "$WAN_IF" -j MASQUERADE 2>/dev/null || true
     fi
     echo "$FORWARD_BEFORE" >/proc/sys/net/ipv4/ip_forward 2>/dev/null || true
+    timeout 20 ssh -F /dev/null -n -o BatchMode=yes -o StrictHostKeyChecking=no \
+        -o "ControlPath=$SSH_CONTROL" -O exit "root@$HK_HOST" >/dev/null 2>&1 || true
     info "evidence retained at $WORK (exit host dir $HK_DIR)"
 }
 
@@ -108,7 +118,9 @@ main() {
 
     info "deploying the musl binary to the Exit host"
     hk "mkdir -p '$HK_DIR'/home '$HK_DIR'/xdg '$HK_DIR'/run '$HK_DIR'/config"
-    scp -q -o BatchMode=yes -o StrictHostKeyChecking=no -o "UserKnownHostsFile=$SSH_KNOWN_HOSTS" \
+    timeout 600 scp -F /dev/null -q -o BatchMode=yes -o StrictHostKeyChecking=no \
+        -o ControlMaster=auto -o "ControlPath=$SSH_CONTROL" -o ControlPersist=600 \
+        -o "UserKnownHostsFile=$SSH_KNOWN_HOSTS" \
         -i "$SSH_KEY" "$BIN" "root@$HK_HOST:$HK_DIR/fuckipv6"
     hk "chmod 0755 '$HK_DIR/fuckipv6'"
 
@@ -175,7 +187,9 @@ if outcome.get("status") == "rejected":
     raise SystemExit(3)
 print(json.dumps(outcome, indent=2, ensure_ascii=False))
 PYCLIENT
-    scp -q -o BatchMode=yes -o StrictHostKeyChecking=no -o "UserKnownHostsFile=$SSH_KNOWN_HOSTS" \
+    timeout 600 scp -F /dev/null -q -o BatchMode=yes -o StrictHostKeyChecking=no \
+        -o ControlMaster=auto -o "ControlPath=$SSH_CONTROL" -o ControlPersist=600 \
+        -o "UserKnownHostsFile=$SSH_KNOWN_HOSTS" \
         -i "$SSH_KEY" "$WORK/ipc_client.py" "root@$HK_HOST:$HK_DIR/ipc_client.py"
 
     info "starting the Exit Node and embedded coordinator on $HK_HOST"
@@ -233,6 +247,40 @@ PYCLIENT
         '{command:"set_network_role",payload:{network_name:$n,role:"exit_node",enabled:true}}')
     hk "python3 '$HK_DIR/ipc_client.py' '$HK_DIR/run/node.sock' '$command'" >"$WORK/evidence/exit-role.json" \
         || { hk "tail -40 '$HK_DIR/host.log'" >&2 || true; fail "authorising the Exit Node role was rejected"; }
+
+    info "publishing the administrator Exit authorization directory"
+    hk "cat '$HK_DIR/config/$NET/network.json'" >"$WORK/evidence/host-network-record.json" \
+        || fail "could not read the authoritative network record"
+    local profile_revision update_command
+    profile_revision=$(jq -r '.revision' "$WORK/evidence/host-network-record.json")
+    update_command=$(jq -cn --arg n "$NET" --argjson rev "$profile_revision" \
+        --argjson up "$(jq -c '{purpose,icon,language,region,tags,capability_declarations,visibility,join_mode,
+            exit_contribution,exit_contribution_scope,exit_contribution_mode,
+            exit_selection_policy:{mode:{mode:"fixed",exit:.owner},default_exit:.owner,
+              available_exits:[.owner],denied_exits:[],groups:[],members:[],
+              session_transition:"fail_closed"}}' \
+            "$WORK/evidence/host-network-record.json")" \
+        '{command:"update_network_profile",payload:{network_name:$n,expected_revision:$rev,update:$up}}')
+    hk "python3 '$HK_DIR/ipc_client.py' '$HK_DIR/run/node.sock' '$update_command'" \
+        >"$WORK/evidence/exit-directory.json" 2>"$WORK/evidence/exit-directory.err" \
+        || { cat "$WORK/evidence/exit-directory.err" "$WORK/evidence/exit-directory.json" >&2 || true; fail "the Exit authorization directory update was rejected"; }
+    jq -e '.status == "network_profile_updated"' "$WORK/evidence/exit-directory.json" >/dev/null \
+        || fail "the Exit authorization update did not apply"
+
+    info "verifying the Exit Node is selectable before inviting the client"
+    local selectable=0
+    for ((i = 0; i < 30; i++)); do
+        if hk "python3 '$HK_DIR/ipc_client.py' '$HK_DIR/run/node.sock' '{\"command\":\"get_snapshot\"}'" \
+            >"$WORK/evidence/host-snapshot.json" 2>/dev/null; then
+            if jq -e '[.data.exit_selections[]?.resolution.selectable_exits // []] | flatten | length >= 1' \
+                "$WORK/evidence/host-snapshot.json" >/dev/null 2>&1; then
+                selectable=1
+                break
+            fi
+        fi
+        sleep 1
+    done
+    [ "$selectable" = 1 ] || { jq -c '.data.exit_selections' "$WORK/evidence/host-snapshot.json" >&2 || true; fail "the Exit Node never became selectable in the directory"; }
 
     info "reading the Exit Node virtual address"
     local exit_v6=""
@@ -366,6 +414,24 @@ SH
     ip netns exec "$NS" ip route replace default dev "$tun_name"
     ip netns exec "$NS" ip -6 route replace default dev "$tun_name"
     ip netns exec "$NS" ip route get 1.1.1.1 | tee "$WORK/evidence/client-route-to-internet.txt"
+
+    info "waiting for the runtime to project the Exit routing decision"
+    local routed=0
+    for ((i = 0; i < 60; i++)); do
+        ip netns exec "$NS" python3 "$WORK/ipc_client.py" "$client_sock" '{"command":"get_snapshot"}' \
+            >"$WORK/evidence/client-snapshot-routed.json" 2>/dev/null || true
+        if jq -e '[.data.routing_summaries[]? | select(.default_action.kind == "exit")] | length >= 1' \
+            "$WORK/evidence/client-snapshot-routed.json" >/dev/null 2>&1; then
+            routed=1
+            break
+        fi
+        sleep 1
+    done
+    [ "$routed" = 1 ] || { jq -c '.data.routing_summaries' "$WORK/evidence/client-snapshot-routed.json" >&2 || true; fail "the client never projected an Exit routing decision"; }
+    jq -c '.data.routing_summaries[]?' "$WORK/evidence/client-snapshot-routed.json" >"$WORK/evidence/routing-summary.json"
+    jq -c '.data.traffic_session | {state,reason_code}' "$WORK/evidence/client-snapshot-routed.json" \
+        >"$WORK/evidence/traffic-session-routed.json"
+    info "routing summary: $(cat "$WORK/evidence/routing-summary.json")"
 
     info "verifying the Exit path is selected and protected"
     jq -c '.data.exit_selections[]?' "$WORK/evidence/client-snapshot.json" >"$WORK/evidence/exit-selections.json" || true

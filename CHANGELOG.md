@@ -193,6 +193,7 @@ All notable changes are documented here. The project follows semantic versioning
 - 将稳定期 P2P 探针收紧为 2 秒一次、1 秒响应宽限，使 UDP 黑洞更快被判定为不可用并把流量切换到 QUIC/TCP 信令回退。
 
 ### Documentation
+- **W16 文档对齐实现**: `docs/W16_ANDROID_SURFACE_MOUNT.zh-CN.md` 从「成员页与 SAF 未挂载、148 项单测」改写为当前事实：14 个导航页面全部挂载真实数据面、传输与 SAF 已接线、可写治理清单（成员/加入申请/邀请/黑名单/路由热更新/本机 Exit/管理员恢复）逐项列出、验证基线 196 项单测；`W16-01` 的 8 个勾选项按证据更新（五模块、共享契约、状态词汇一致、底部导航与确认、页面状态、不展示不支持的操作勾选；深色模式保持未勾选并说明这是产品调色板决定，无障碍保持 `[~]` 并说明整屏 TalkBack 巡检需真机），W16 标题与看板状态同步为 `[~]`。
 - 归档 LXT UDP 辅助 TCP 握手救援实验 V4–V8，共记录 8 个测试科目、Python 实验代码、5 份报告和原始日志/抓包证据；入口见 `experimental/README.md`。实验验证了在可控 SYN-ACK 阻断和部分真实公网路径上的握手救援，但也确认 PREROUTING/conntrack 前丢弃、严格 invalid 过滤、UDP 不可达及真实第三方中间盒仍是关键边界。正式 Rust 实现现已由 `fuckipv6 lxt-rescue server|client` 接入，但仍是 Linux 可选实验路径，不能视为生产级传输或通用穿透方案。
 - 对齐 README、快速开始、部署、迁移清单与变更记录中的统一节点模型：产品层只有节点，`host`/`join` 是同一程序创建或加入网络的操作；明确 NX-08 已交付真实 GPUI 原生外壳，但 11 个业务页面、GPUI/WebUI 语义对等测试和跨平台实机验证仍未完成，不能把目标状态描述为已交付。
 - 固化统一节点目标架构：唯一产品身份为节点，协调/信令/中继/Exit Node 都是按网络承担的服务角色；明确 GPUI/WebUI 必须共享命令层、状态契约与能力清单，并列出独立协调二进制、浏览器伪桌面和重复 UI 业务逻辑的迁移/删除边界。

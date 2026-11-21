@@ -62,7 +62,7 @@
 | W13 Relay | `[x]` | P1 | W10 | W13-01 至 W13-07 已完成：独立热启停、intent 持久化、稳定失败原因码、双侧签名授权、拒绝优先、实时撤权、既有会话策略、owner-only 治理审计和 durable audit 导出均有自动化证据；真实 Relay 子进程运营者导出只含最小 usage/health/governance 字段，不包含载荷、虚拟地址、密钥或显示名；生产数据面故障转移写入同一 owner audit 链并合并到活动快照，临时 Coordinator Relay 冻结检查已覆盖。Linux 单 Relay 进程 SIGKILL/重启后的端口复用、旧会话不可接管和新证书恢复、真实子进程连接风暴/慢连接/资源上限/吞吐/延迟/CPU/RSS、满载期间 Snapshot/Manifest 可用性及 Relay/Coordinator/Exit 同时故障恢复均有进程或 netns 证据。GPUI、WebUI 与 Android Compose Relay 页面现统一消费共享 Manifest、`NodeSnapshot`、健康/治理投影和 `SetNetworkRole` 命令；Android 在快照或真实命令回调缺失时失败关闭，不注入示例状态。Android 的 VpnService、节点 IPC 和真机 E2E 仍归 W16，不在本项冒充平台数据面完成 |
 | W14 Coordinator 接管 | `[x]` | P1 | W10,W12,W13 | W14-01 至 W14-10 全部完成：候选组与签名声明、任期/租约/fencing、严格多数接管、分区无多数保护、旧 Leader 只读恢复、紧急临时 Leader、临时权限冻结、管理员阈值恢复、数据面连续性以及脑裂/断电/netns 故障演练均有自动化与真实进程证据；有界穷举交错扫描、真实多进程 SIGKILL/SIGSTOP 矩阵、QEMU 断电与多节点离线 Trustee 恢复演练补齐了残余路径 |
 | W15 File | `[~]` | P2 | W10 | W15-02/03/05/07 已完成（ACL 与字段隐私、上传下载与续传、符号链接与竞态、撤权与中断）；本地 domain/ACL/路径/临时文件/续传适配器、GPUI owner 设置与 IPC、GPUI/WebUI File 目录浏览/目标选择/上传下载/分页/暂停恢复/取消、并发/速率/磁盘/扫描/审计上界已落地；Linux 独立三节点真实网络传输、恢复与四槽满载控制面隔离验收已完成，Android File 表面/SAF、Windows/macOS 实机路径安全与传输竞态、跨平台验收及 OS/性能资源基线仍未完成 |
-| W16 Android | `[ ]` | P2 | W2,W4,W5,W7-W15 | Compose、VpnService、全能力 |
+| W16 Android | `[~]` | P2 | W2,W4,W5,W7-W15 | 14 个导航页面与命令通道已接通（含批量审批、黑名单、路由热更新、本机 Exit 开关、首次启动引导）；真机项（VpnService 包转发/前台服务、SAF 交互、进程恢复）与深色模式待做 |
 | W17 跨平台硬化 | `[ ]` | P2 | W6-W16 | Linux/macOS/Windows 实机证据 |
 | W18 发布门禁 | `[~]` | P0 | 全部 | 自动化、实测、安全和发布证据；W18-02 的 fmt/clippy/未使用代码与工具链绑定、W18-04 的本地契约门禁已取证，其余子项与平台门禁待 CI 转绿 |
 
@@ -4206,21 +4206,24 @@ debug 测试构建；命令为
 
 目标：Android 与桌面共享领域契约，但按平台实现 Compose、前台 VpnService、Credential Manager 和 SAF。关闭 Activity 不断网，能力由节点 owner 决定。
 
-### W16-01 Compose 五模块与共享契约 `[ ]`
+### W16-01 Compose 五模块与共享契约 `[~]`
 
 > 补充（2026-11-21，CI 门禁）：`verify.yml` 新增 `android` job（JDK 21、`platforms;android-36`、`build-tools;36.0.0`、Gradle 缓存），
 > 运行 `:app:testDebugUnitTest :app:lintDebug :app:assembleDebug` 并上传报告；`android` 同时进入 `aggregate` 的 `needs`/
 > `--upstream-result` 和 `release-gate.py` 的 `UPSTREAM_JOBS`，缺失或失败都会让聚合门禁失败关闭。Android 侧此前完全没有 CI 覆盖，
 > 现在本机按同一命令实跑通过（148 项单测 + lint + debug 构建）。
 
-- [ ] 实现概览、节点、网络、活动、设置五模块；
-- [ ] 使用生成/共享的 Node/Network/Operation/Error 契约；
-- [ ] 术语、状态优先级和危险操作语义与桌面一致；
-- [ ] 窄屏使用底部导航、全屏确认和可滚动详情；
-- [ ] 页面具备加载、空、错误、无权限、不支持、降级和陈旧状态；
-- [ ] 支持中英文和系统深色模式；
-- [ ] 无障碍标签、焦点和触控目标达到规范；
-- [ ] 不展示桌面专用但 Android 不支持的操作。
+- [x] 实现概览、节点、网络、活动、设置五模块（导航契约 14 个页面全部挂载真实数据面，见 `W16_ANDROID_SURFACE_MOUNT`）；
+- [x] 使用生成/共享的 Node/Network/Operation/Error 契约（`contract/SharedContracts` 读取随包 `contracts/android` 生成物，
+      bridge 按 `wireEnum` 失败关闭解析）；
+- [x] 术语、状态优先级和危险操作语义与桌面一致（`scripts/check-surface-state-parity.py` 守住 Android/WebUI/目录的状态词汇，
+      `SurfaceCatalogTest` 解析全部运行时组合键）；
+- [x] 窄屏使用底部导航、全屏确认和可滚动详情（`NavigationBar` + 确认 `AlertDialog`，成员/加入/邀请/黑名单/路由/Exit 危险动作都走确认）；
+- [x] 页面具备加载、空、错误、无权限、不支持、降级和陈旧状态（`SurfaceStatus` 14 个状态与目录逐一对应，缺数据一律「未观察」）；
+- [ ] 支持中英文和系统深色模式（中英文已覆盖；**深色模式未做**：设计令牌在两种系统模式下都是纸面色，Android 刻意不发明第二套外观，
+      这是产品设计决定而非实现缺口，需要先定深色调色板）；
+- [~] 无障碍标签、焦点和触控目标达到规范（主要卡片有 heading 语义与 testTag；整屏 TalkBack 巡检需真机，`lintDebug` 无无障碍告警）；
+- [x] 不展示桌面专用但 Android 不支持的操作（未挂载的编辑能力不渲染按钮，路由/Exit/拓扑只读并由 `translateOr` 兜底文案）。
 
 **验收**：Android 是同一产品的平台实现，不是独立概念或静态展示应用。
 

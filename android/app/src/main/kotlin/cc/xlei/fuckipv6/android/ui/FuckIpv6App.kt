@@ -77,6 +77,7 @@ fun FuckIpv6App(
     topology: cc.xlei.fuckipv6.android.bridge.TopologyView? = null,
     blacklist: cc.xlei.fuckipv6.android.bridge.BlacklistView? = null,
     onUpdateRouting: ((mode: String, exitNode: String?, isExitNode: Boolean) -> Unit)? = null,
+    onSetLocalExit: ((Boolean) -> Unit)? = null,
     onRefreshBlacklist: (() -> Unit)? = null,
     onBanClient: ((String) -> Unit)? = null,
     onUnbanClient: ((String) -> Unit)? = null,
@@ -198,6 +199,7 @@ fun FuckIpv6App(
                 topology = topology,
                 blacklist = blacklist,
                 onUpdateRouting = onUpdateRouting,
+                onSetLocalExit = onSetLocalExit,
                 onRefreshBlacklist = onRefreshBlacklist,
                 onBanClient = onBanClient,
                 onUnbanClient = onUnbanClient,
@@ -272,6 +274,7 @@ fun PageContent(
     topology: cc.xlei.fuckipv6.android.bridge.TopologyView? = null,
     blacklist: cc.xlei.fuckipv6.android.bridge.BlacklistView? = null,
     onUpdateRouting: ((mode: String, exitNode: String?, isExitNode: Boolean) -> Unit)? = null,
+    onSetLocalExit: ((Boolean) -> Unit)? = null,
     onRefreshBlacklist: (() -> Unit)? = null,
     onBanClient: ((String) -> Unit)? = null,
     onUnbanClient: ((String) -> Unit)? = null,
@@ -406,6 +409,7 @@ fun PageContent(
                     locale = locale,
                     local = localExit,
                     selections = exitSelections,
+                    onSetLocalExit = onSetLocalExit,
                 )
             pageId == "routing" && routing != null ->
                 RoutingContent(

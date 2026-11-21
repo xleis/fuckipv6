@@ -36,9 +36,23 @@ data class ExitSelectionView(
 )
 
 object ExitSurface {
+    /**
+     * Owner-controlled local Exit intent. The command only carries the flag; the
+     * node still enforces its own capability gate, so a phone cannot make an
+     * unsupported host serve Exit traffic.
+     */
+    fun localExitCommand(enabled: Boolean): JSONObject = JSONObject()
+        .put("command", "set_local_exit_capability")
+        .put("payload", JSONObject().put("enabled", enabled))
+
     fun parseLocalExit(snapshot: JSONObject): LocalExitView? {
         val local = snapshot.optJSONObject("local_exit") ?: return null
-        return LocalExitView(
+        return parseLocalExitObject(local)
+    }
+
+    /** Parses the bare `local_exit_capability` projection returned by the command. */
+    fun parseLocalExitObject(local: JSONObject): LocalExitView =
+        LocalExitView(
             ownerExitEnabled = local.optBoolean("owner_exit_enabled", false),
             networkAllowed = local.optBoolean("network_allowed", false),
             stage = local.stringOrNull("stage"),
@@ -47,7 +61,6 @@ object ExitSurface {
             totalClients = local.longOrNull("total_clients") ?: 0L,
             problemCode = local.optJSONObject("problem")?.stringOrNull("code"),
         )
-    }
 
     fun parseSelections(snapshot: JSONObject): List<ExitSelectionView>? {
         val raw = snapshot.opt("exit_selections") ?: return null

@@ -111,8 +111,10 @@ class MainActivity : ComponentActivity() {
     private val invitations = MutableStateFlow<List<InvitationView>?>(null)
     private val issuedInvitationCode = MutableStateFlow<String?>(null)
     private val blacklist = MutableStateFlow<BlacklistView?>(null)
+    private val localExit = MutableStateFlow<cc.xlei.fuckipv6.android.bridge.LocalExitView?>(null)
     private var blacklistBridge: NodeCommandBridge? = null
     private var routingBridge: NodeCommandBridge? = null
+    private var exitBridge: NodeCommandBridge? = null
     private var memberNetworkId: String? = null
     private val selectedNetwork = MutableStateFlow<String?>(null)
 
@@ -192,6 +194,27 @@ class MainActivity : ComponentActivity() {
                             outcome.outcomeStatus == "blacklist"
                         ) {
                             BlacklistSurface.parse(outcome.data)?.let { blacklist.value = it }
+                        }
+                    }
+                }
+            }
+        exitBridge = apiConfig
+            ?.takeIf { it.isValid }
+            ?.let { NodeCommandBridge(NodeCommandClient(it)) }
+            ?.also { bridge ->
+                bridgeScope.launch {
+                    bridge.lastOutcome().collect { outcome ->
+                        if (outcome is CommandOutcome.Succeeded &&
+                            outcome.outcomeStatus == "local_exit_capability"
+                        ) {
+                            // The command returns the authoritative projection; apply
+                            // it and refresh the snapshot so nothing else drifts.
+                            outcome.data?.let { data ->
+                                runCatching { ExitSurface.parseLocalExitObject(data) }
+                                    .getOrNull()
+                                    ?.let { localExit.value = it }
+                            }
+                            node?.pollOnce()
                         }
                     }
                 }
@@ -391,12 +414,14 @@ class MainActivity : ComponentActivity() {
                             identity = ready?.peers?.let(IdentitySurface::parse),
                             networks = ready?.peers?.let(NetworksSurface::parse),
                             routing = ready?.peers?.let(RoutingSurface::parse),
-                            localExit = ready?.peers?.let(ExitSurface::parseLocalExit),
+                            localExit = localExit.collectAsState().value
+                                ?: ready?.peers?.let(ExitSurface::parseLocalExit),
                             exitSelections = ready?.peers?.let(ExitSurface::parseSelections),
                             topology = ready?.peers?.let(TopologySurface::parse),
                             blacklist = blacklistState,
                             onRefreshBlacklist = { refreshBlacklist(selectedNetwork.value) },
                             onUpdateRouting = ::updateRouting,
+                            onSetLocalExit = ::setLocalExit,
                             onBanClient = ::banClient,
                             onUnbanClient = ::unbanClient,
                             availableNetworks = availableNetworks,
@@ -582,6 +607,18 @@ class MainActivity : ComponentActivity() {
                 command = command,
                 requestId = nextRequestId(),
                 idempotencyKey = "routing-update-$networkName-${UUID.randomUUID()}",
+            ),
+        )
+    }
+
+    private fun setLocalExit(enabled: Boolean) {
+        val bridge = exitBridge ?: return
+        bridge.submit(
+            bridgeScope,
+            CommandJson.envelope(
+                command = ExitSurface.localExitCommand(enabled),
+                requestId = nextRequestId(),
+                idempotencyKey = "local-exit-$enabled-${UUID.randomUUID()}",
             ),
         )
     }

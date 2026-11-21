@@ -82,4 +82,27 @@ class ExitSurfaceTest {
         assertNull(ExitSurface.parseSelections(JSONObject("""{"exit_selections":"nope"}""")))
         assertTrue(ExitSurface.parseSelections(JSONObject("""{"exit_selections":[]}"""))!!.isEmpty())
     }
+
+    @Test
+    fun localExitCommandCarriesOnlyTheOwnerFlag() {
+        val enable = ExitSurface.localExitCommand(true)
+        assertEquals("set_local_exit_capability", enable.getString("command"))
+        assertTrue(enable.getJSONObject("payload").getBoolean("enabled"))
+        val disable = ExitSurface.localExitCommand(false)
+        assertFalse(disable.getJSONObject("payload").getBoolean("enabled"))
+    }
+
+    @Test
+    fun theCommandProjectionParsesWithoutAnEnvelope() {
+        val projection = ExitSurface.parseLocalExitObject(
+            JSONObject(
+                """{"owner_exit_enabled":false,"network_allowed":true,"stage":"disabled","healthy":false,"active_clients":0,"total_clients":3}""",
+            ),
+        )
+        assertFalse(projection.ownerExitEnabled)
+        assertTrue(projection.networkAllowed)
+        assertEquals("disabled", projection.stage)
+        assertFalse(projection.serving)
+        assertEquals(3L, projection.totalClients)
+    }
 }

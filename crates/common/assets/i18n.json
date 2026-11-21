@@ -3376,7 +3376,9 @@
       "blacklist.section.title": "客户端黑名单",
       "blacklist.action.ban": "封禁",
       "blacklist.action.unban": "解除",
-      "blacklist.input.label": "客户端标识"
+      "blacklist.input.label": "客户端标识",
+      "exit.action.enable": "开启本机 Exit",
+      "exit.action.disable": "关闭本机 Exit"
     },
     "en": {
       "nav.overview": "Overview",
@@ -6752,7 +6754,9 @@
       "blacklist.section.title": "Client blacklist",
       "blacklist.action.ban": "Ban",
       "blacklist.action.unban": "Unban",
-      "blacklist.input.label": "Client id"
+      "blacklist.input.label": "Client id",
+      "exit.action.enable": "Enable local Exit",
+      "exit.action.disable": "Disable local Exit"
     }
   }
 }

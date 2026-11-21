@@ -4943,11 +4943,14 @@ WebUI 195.6875），真正偏差是两段：
 `role="menuitemradio"` 的页面切换器——旧等待条件永远匹配不到，表现为 `waitFor` 超时。现在脚本
 用键盘打开该 disclosure 并用 Enter 选中条目，**键盘-only 导航到 Networks > Topology 已经通过**。
 
-随后脚本在下一个断言失败：`g.topology-node[role=option]` 期望 3 个、实际渲染 2 个。脚本自己的
-fixture 里有 3 个节点（`node-self`、`node-bob` 与第三个），其中 Bob 同时属于 `home` 与 `studio`。
-因此这处差异指向"拓扑是否按当前选中网络过滤节点"的语义，而不是脚本笔误——在语义定下来之前
-改断言会把真实行为变化掩盖成通过。第 4 条仍不勾：导航已修复，节点数与长按/右键/焦点恢复三段
-仍需按最终语义校对。
+随后脚本在节点数断言失败：期望 3 个、实际渲染 2 个。核对 fixture 后语义已定：`node-self` 属于
+`home`，`node-bob` 属于 `home` + `studio`，`node-carol` 只属于 `studio`；`topology-view.tsx` 的
+`renderedNodes` 只渲染 `layout.placements` 里有的节点，而 placemet 按可见网络生成。因此"home 下看到
+2 个节点"是**按选中网络渲染**的设计结果，旧断言 3 编码的是已经不存在的行为。断言已改为 2 并写明原因。
+
+修到这一层后脚本停在下一处：`tabTo` 无法用 Tab 到达 "freeze control"（焦点停在 body）。这是第三层
+脚本债（治理冻结控件的可达性），需要单独核对。第 4 条仍不勾：键盘导航与按网络渲染已对齐，
+长按/右键/焦点恢复与 freeze 控件三段待办。
 
 ### W18-06 网络质量与抗干扰证据 `[ ]`
 

@@ -5003,16 +5003,33 @@ Android 前台服务未实现）；第 5 条的 TUN 残留问题仍有 2026-11-1
 
 ### W18-10 可复现构建与发布产物 `[ ]`
 
-- [ ] 干净工作区从锁定依赖构建；
+- [x] 干净工作区从锁定依赖构建；
 - [ ] 构建工具链和 feature 列表固定；
 - [ ] 产物签名、校验和与来源证明；
 - [ ] WebUI/Android 资产哈希记录；
-- [ ] SBOM/许可证清单；
+- [x] SBOM/许可证清单；
 - [ ] 发布说明列出能力、限制和迁移；
 - [ ] 二进制不包含测试秘密或开发凭据；
-- [ ] 发布产物与 commit 对应。
+- [x] 发布产物与 commit 对应；
 
 **验收**：第三方可从记录环境复现构建并验证发布产物来源。
+
+**证据（2026-11-21，按 release 工作流与脚本现状核对）**：
+
+- **第 1 条**：`release-gate.py` 的 `--require-clean` 是发布默认，`Cargo.lock` 固定在仓库内，`release-material.py`
+  在源树 dirty 时直接拒绝（`source tree is dirty; commit changes or pass --allow-dirty for non-release
+  diagnostics`），因此发布产物的输入是干净树加锁定依赖；
+- **第 5 条**：`release-material.py` 从 `Cargo metadata` 与 `Cargo.lock` 生成 SPDX SBOM、SHA256 与 provenance
+  sidecar，三个平台的 package job 都调用它；
+- **第 8 条**：provenance 里写 `fuckipv6:source-commit` 与 `vcs` 外部引用（指向 `{repo}/tree/{commit}`），
+  SPDX namespace 也以 commit 为种子，因此产物与 commit 一一对应。
+
+其余五条不勾，缺口逐条列出：**第 2 条**工作流用 `dtolnay/rust-toolchain@stable`，stable 不 pin 具体版本，
+不满足"工具链固定"；**第 3 条**脚本自述"does not sign artifacts or produce a SLSA attestation"，
+只有校验和与未签名 provenance；**第 4 条**`dist` 里没有 WebUI/Android 资产的独立哈希记录，构建产物
+`app.js` 目前只是随源码提交；**第 6 条**发布说明停留在 CHANGELOG 的自由文本，没有"能力/限制/迁移"
+结构化清单；**第 7 条**没有任何步骤检查二进制里是否残留测试秘密或开发凭据（`client_key.pem`、
+`client.toml`、`coordinator.toml` 仍在仓库根）。
 
 ### W18-11 发布阻断逐项签核 `[ ]`
 

@@ -5132,7 +5132,12 @@ runtime dir），不是环境变量，因此 unset 变量并不能伪造无头�
   四个 `lifecycle-cleanup-*` 子项与 `benchmark` 39.3s 全 PASS。范围说明：本机是 Arch Linux /
   kernel 7.3.4-zen2，**不在**支持发行版矩阵内（因此 W17-01 第 1 条仍不勾），CI 是 Ubuntu runner；
   本条勾的是"Linux 这份报告存在且通过"，发行版矩阵由 W17-01 承担；
-- **macOS / Windows（第 2、3 条）**：两者此前都在 120 分钟时限被 cancelled，现为 240 分钟。这两个平台此前从未产出过一份报告，因此第 2、3 条没有任何可引用证据，不勾；
+- **macOS / Windows（第 2、3 条）**：两条平台 gate 已连续三次在时限内跑不完——120 分钟、240 分钟、
+  以及跳过 `release-build`+`benchmark` 后的 180 分钟都得到 `cancelled`。现在改为跳过 `test`（保留
+  `check`、`clippy`、`lifecycle-cleanup` 与各自的 cross-check），预算 120 分钟，并在报告里以
+  `skipped_checks` 显式记录。这样至少能产出**一份报告**，但它只证明"该平台能编译并通过轻量检查"，
+  全量测试由同一 commit 的 Linux gate 承担——因此第 2、3 条仍不勾：真正的平台实机证据需要目标机器，
+  不是更长的 runner 预算；
 - **Android（第 4 条）**：CI 的 Android job 已通过（JDK 21、共享 i18n 字面量检查、单测、lint、debug 构建），但 W16-08 的真机 E2E 与 W16-02 的前台 VpnService 仍未执行，第 4 条不勾；
 - **可访问性（第 7 条）**：三端证据不齐，因此不勾——WebUI 侧 `scripts/test_webui_accessibility.mjs`
   passed（W18-03 已记）；GPUI 侧有 `shell_declares_structural_accessibility_roles`，断言

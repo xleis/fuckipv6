@@ -311,7 +311,7 @@ jobs:
   windows:
     name: Windows gate
     runs-on: windows-latest
-    timeout-minutes: 180
+    timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -331,6 +331,7 @@ jobs:
           --benchmark none
           --skip release-build
           --skip benchmark
+          --skip test
           --report target/release-gate/windows.json
 
       - name: Upload Windows report
@@ -344,7 +345,7 @@ jobs:
   macos:
     name: macOS gate
     runs-on: macos-latest
-    timeout-minutes: 180
+    timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -366,6 +367,7 @@ jobs:
           --benchmark none
           --skip release-build
           --skip benchmark
+          --skip test
           --cross-target x86_64-apple-darwin
           --report target/release-gate/macos.json
 

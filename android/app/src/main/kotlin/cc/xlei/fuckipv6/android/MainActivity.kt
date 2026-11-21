@@ -62,6 +62,7 @@ import cc.xlei.fuckipv6.android.bridge.HttpDownloadFetcher
 import cc.xlei.fuckipv6.android.bridge.PendingDownload
 import cc.xlei.fuckipv6.android.bridge.TransferRequest
 import cc.xlei.fuckipv6.android.bridge.NodeEventStream
+import cc.xlei.fuckipv6.android.bridge.SnapshotFrameCoalescer
 import cc.xlei.fuckipv6.android.bridge.RelaySurface
 import cc.xlei.fuckipv6.android.ui.AdminRecoveryPageData
 import cc.xlei.fuckipv6.android.ui.CoordinatorPageData
@@ -263,25 +264,16 @@ class MainActivity : ComponentActivity() {
         // Events only shorten the wait: every frame still triggers one
         // authoritative snapshot pull, and the timed poll stays as fallback.
         if (node != null && apiConfig != null) {
-            val stream = NodeEventStream(apiConfig)
+            // Frames collapse into one authoritative pull per burst, and each
+            // reconnect resumes from the newest cursor instead of replaying.
+            val coalescer = SnapshotFrameCoalescer(
+                scope = bridgeScope,
+                pull = { bridgeScope.launch { node.pollOnce() } },
+            )
             eventJob = bridgeScope.launch {
-                var pending = false
                 while (true) {
-                    val failure = stream.read { frame ->
-                        when (frame.action()) {
-                            is LiveAction.ApplySnapshot -> if (!pending) {
-                                pending = true
-                                node.pollOnce()
-                                pending = false
-                            }
-                            LiveAction.RefreshSnapshot, LiveAction.Resync -> if (!pending) {
-                                pending = true
-                                node.pollOnce()
-                                pending = false
-                            }
-                            LiveAction.Ignore -> Unit
-                        }
-                    }
+                    val stream = NodeEventStream(apiConfig, resumeCursor = coalescer.resumeCursor())
+                    val failure = stream.read { frame -> coalescer.onFrame(frame) }
                     if (failure == null) break
                     delay(5_000)
                 }

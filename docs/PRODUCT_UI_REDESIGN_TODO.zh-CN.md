@@ -4979,14 +4979,18 @@ workspace 与 fuzz 两个目标都输出 `advisories ok, bans ok, licenses ok, s
 
 **验收**：历史“每次测试断网且需手工 kill”的问题有自动化复现与通过证据。
 
-**证据（2026-11-21，commit `a2dd447` 工作区）**：前三条直接引用 W2 已完成项已有的自动化证据，不再重复造轮：
+**证据（2026-11-21，CI Linux gate 首次真实执行这组用例，run `44879084747` / commit `ec596ab`）**：
+这三条此前只能引用 W2 的用例名，本机因桌面会话跳过，CI 上则长期失败或挂死。修掉两处测试基建缺陷
+（piped stderr 的阻塞读、就绪轮询预算）后又发现一个真实产品缺陷：`ensure_webui_start_allowed` 用
+`debug_assert!(resolution.effective.is_web_ui())` 要求解析结果为 `WebUi`，而 `--headless` 解析成
+`UiModeRequest::Headless` → `UiMode::Headless`，于是每个无头 control 进程都在断言处 panic
+（`exit status: 101`）。监听边界改为接受 `WebUi`/`Headless`/`WebViewShell`、只拒绝 `Gpui` 之后，
+`w2_runtime_process` 的 11 项在 CI 上随 `test: PASS (667.5s)` 一同通过：
 
-- **关 UI 不断网**：W2-03 的 `closing_headless_webui_does_not_stop_the_node` 覆盖 headless WebUI
-  关闭后节点继续运行；
-- **control 崩溃 node 继续**：W2-05 的 `new_headless_ui_restarts_crashed_control_and_adopts_live_node`
-  覆盖控制进程崩溃后新实例接管存活节点；
-- **stop node 不断 control/WebUI**：W2-04 的「stop node 保留 control/WebUI」子项与逐项清理报告，
-  只在清理完全干净时返回成功。
+- **关 UI 不断网**：`closing_headless_webui_does_not_stop_the_node` 现于无桌面 runner 真实执行并通过；
+- **control 崩溃 node 继续**：`new_headless_ui_restarts_crashed_control_and_adopts_live_node` 同上；
+- **stop node 不断 control/WebUI**：`stopping_data_plane_keeps_control_and_webui_available` 同上，
+  加上 W2-04 的逐项清理报告语义。
 
 后五条保持未勾，缺口是具体的：第 4 条依赖 W2-08 的系统服务管理器（macOS/Windows 实机未验证、
 Android 前台服务未实现）；第 5 条的 TUN 残留问题仍有 2026-11-16 记录的「进程全部退出后 TUN 仍在、

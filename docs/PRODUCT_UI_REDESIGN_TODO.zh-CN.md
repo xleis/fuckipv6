@@ -5122,6 +5122,13 @@ runtime dir），不是环境变量，因此 unset 变量并不能伪造无头�
 结论：五项为"否"或"部分"，**发布仍被阻断**。这张表就是 W18-11 的反面证据：它记录的是"现在还不能发"，
 而不是"已经发得出去"。
 
+**闸门本身是否有效（`aggregate` 的阻断规则）**：`release-gate.py aggregate` 只在以下全部成立时才输出
+`release_ready=true`——每个上游 job 结果必须 `success`（`validate_upstream_results`）；每份平台报告
+`summary.status` 必须 `passed` 且 `release_ready` 为真；报告必须带 Git commit 且**互相同一**；
+`source.dirty` 必须为 false；`checks` 非空。因此当前 `visual-regression` 的 failure 会直接让
+aggregate 失败，不需要人工判断。这条规则的存在意味着"逐项签核"不是形式主义：机器已经先挡一层，
+人的签核是第二层。
+
 ## 22. MVP / 第一轮实施队列
 
 第一轮不追求先把所有页面做出来，而是先建立不会再次返工的产品地基。

@@ -30,6 +30,11 @@ class TestHttpServer(
         val status: Int,
         val body: String,
         val contentType: String = "application/json",
+        /**
+         * Overrides the advertised `Content-Length` while the body stays short,
+         * so tests can reproduce a stream that dies mid-transfer.
+         */
+        val declaredLength: Int? = null,
     )
 
     private val serverSocket = ServerSocket(0, 8, InetAddress.getLoopbackAddress())
@@ -83,7 +88,7 @@ class TestHttpServer(
             val head = buildString {
                 append("HTTP/1.1 ${response.status} ${statusText(response.status)}\r\n")
                 append("Content-Type: ${response.contentType}\r\n")
-                append("Content-Length: ${bytes.size}\r\n")
+                append("Content-Length: ${response.declaredLength ?: bytes.size}\r\n")
                 append("Connection: close\r\n\r\n")
             }
             connection.getOutputStream().let { output ->

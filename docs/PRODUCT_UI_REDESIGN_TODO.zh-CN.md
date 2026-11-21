@@ -4705,7 +4705,7 @@ Android 单测共 146 项通过。W16-01 仍缺真机验收，保持 `[ ]`。
   “最终只保留一套 React/Vite 产品表面”冲突。它没有被禁用，仍在分发旧样式表与旧组件脚本，
   因此第 7 条不勾，作为发布阻断项记录。
 
-### W18-02 Rust 质量门禁 `[ ]`
+### W18-02 Rust 质量门禁 `[x]`
 
 **补充（2026-11-21，第二次本地 release-gate linux 实跑）**：修掉 musl 交叉编译与 `UiSurfaceKind::Gpui` 死代码告警后重跑，
 `python3 scripts/release-gate.py run --platform linux --toolchain stable --allow-dirty --benchmark none` 的结果只剩一项红：
@@ -4753,7 +4753,7 @@ Android 单测共 146 项通过。W16-01 仍缺真机验收，保持 `[ ]`。
 - [x] `cargo fmt --check` 通过；
 - [x] `cargo clippy --workspace --all-targets --all-features -- -D warnings` 通过；
 - [x] `cargo test --workspace --all-features` 通过；
-- [ ] feature 组合无法一次构建时提供明确矩阵结果；
+- [x] feature 组合无法一次构建时提供明确矩阵结果；
 - [x] 契约测试、集成测试和故障注入通过；
 - [x] 无禁用测试、吞错或无条件 pass；
 - [x] 编译警告和未使用代码处理完成；
@@ -4794,8 +4794,12 @@ run --platform linux` 的每一步都 PASS——`format` 4.9s、`helper-tests` 0
 CAP_NET_ADMIN 或在无桌面环境运行"，3 项是显式的 instrumented harness（`--ignored` 时才跑），
 不存在无条件 pass 或吞错。
 
-第 4 条（feature 组合矩阵）仍空：仓库没有一份"哪些 feature 组合各自独立可构建"的矩阵结果，
-`--all-features` 通过不等于每个子集通过。
+第 4 条由新增的 `scripts/check-feature-matrix.sh` 补上：它遍历 crate 声明的子集并逐个
+`cargo check -p fuckipv6-client --all-targets`，把 PASS/FAIL 与耗时写进
+`target/feature-matrix/summary.tsv`，任一组合失败即退出非零（可直接进 CI）。当前六组全部通过：
+`default`（含 `gpui-shell`）、`no-default`、`gpui-shell`、`secure-lock-metrics`、
+`userspace-nat`、`all-features`。八个子项至此全部勾选，`--all-features` 通过**加上**每个子集各自
+通过，才算本条的"不以一次构建代替矩阵"。
 
 **补充（2026-11-21，CI 的 `test` 步骤为什么从不结束）**：Linux gate 的 `test` 从 8 分钟涨到 147 分钟并
 被 150 分钟时限 cancelled，而日志显示断言其实早已通过——`running 1568 tests` 一步就报

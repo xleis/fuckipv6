@@ -4902,9 +4902,20 @@ bindings` 结论 **success**。此前同 job 一直红，根因不在契约本�
 7 份契约（command、command-request、command-result、event、http、snapshot、ui-manifest，均为 v1）。
 发布记录因此能说明产物实现了哪一版 wire schema，而不只是它由哪个 commit 构建。
 
-**第 5 条仍不勾**：`webui/src/contract/invariants.ts` 自带 `BACKEND_STATUSES` 等手写取值集合，
-与生成的 DTO 枚举并存；要满足"前端不手写重复领域枚举"需要把这些集合改为从生成产物导入，
-本轮未做。
+**第 5 条（2026-11-21，迁移 28/43）**：生成器现在为 131 个 string enum 各输出 `<NAME>_VALUES`
+运行时数组，`invariants.ts` 里 **43 个手写集合中有 28 个**已改为从生成产物导入（`PERMISSIONS`、
+`AVAILABILITIES`、`INPUT_KINDS`、`VALIDATIONS`、`OPERATION_STATES`、`NODE_NETWORK_STATUS_VALUES`、
+`TRAFFIC_*`、`POLICY_*`、`ADMIN_RECOVERY_STATES` 等），元素类型保持 `string` 以沿用现有调用方。
+typecheck、lint、349 项单测、build、i18n 与可访问性探针在改动后全部通过。
+
+剩余 15 个分两类：**6 个**（`LIFECYCLE_PHASES`、`MEMBERSHIP_ROLES`、`MEMBER_GROUPS`、
+`POLICY_CHANGE_ACTIONS`、`TRAFFIC_POLICY_CHANGE_ACTIONS`、`TUN_PLATFORMS`）有多个值集相同的候选，
+需要按语义挑定一个，不能由值集自动匹配；**9 个**（`BACKEND_STATUSES`、`OPERATION_TERMINAL_STATES`、
+`OUTCOME_STATUSES`、`MEMBER_REMOVAL_IMPACT_KEYS`、`NETWORK_JOIN_MODES`、`EXIT_CONTRIBUTION_MODES`、
+`EXIT_CONTRIBUTION_SCOPES`、`TRAFFIC_FAILURE_KINDS`、`TRAFFIC_PROTECTION_STATES`、
+`TRAFFIC_MATCH_RISK_KINDS`）在生成产物里没有对应枚举——它们有的是前端特有的展示映射，有的来自
+inline union（如 `NodeUiBackendStatus`），后者需要生成器为 inline enum 也产出值数组才能消除手写。
+本条因此仍不勾：重复已从 43 处降到 15 处，但"不手写重复领域枚举"尚未满足。
 
 ### W18-05 视觉与交互回归 `[ ]`
 

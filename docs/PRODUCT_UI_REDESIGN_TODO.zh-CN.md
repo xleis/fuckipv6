@@ -5073,7 +5073,11 @@ runtime dir），不是环境变量，因此 unset 变量并不能伪造无头�
 - **Linux（第 1 条）**：本机以 `python3 scripts/release-gate.py run --platform linux --toolchain stable --allow-dirty --benchmark none` 复跑，`format`/`docs`/`helper-tests`/`single-binary`/`check`/`test`/`release-build`/`lifecycle-cleanup`（含 route、dns、tun、exit-rules）/两条交叉检查/`stable-source`/`benchmark` 全部 passed；随后的 `cargo clippy --workspace --all-targets --all-features -- -D warnings` 也为 exit 0。CI 的 Linux job 由于 60 分钟时限被 cancelled，时限已提到 150 分钟，待复跑转绿后第 1 条才可勾。注意这只是本机 Linux，不是"实机报告"意义上的目标机型矩阵；
 - **macOS / Windows（第 2、3 条）**：两者此前都在 120 分钟时限被 cancelled，现为 240 分钟。这两个平台此前从未产出过一份报告，因此第 2、3 条没有任何可引用证据，不勾；
 - **Android（第 4 条）**：CI 的 Android job 已通过（JDK 21、共享 i18n 字面量检查、单测、lint、debug 构建），但 W16-08 的真机 E2E 与 W16-02 的前台 VpnService 仍未执行，第 4 条不勾；
-- **可访问性（第 7 条）**：WebUI 侧 `scripts/test_webui_accessibility.mjs` passed（W18-03 已记），GPUI/Compose 侧没有等价自动证据，不勾；
+- **可访问性（第 7 条）**：三端证据不齐，因此不勾——WebUI 侧 `scripts/test_webui_accessibility.mjs`
+  passed（W18-03 已记）；GPUI 侧有 `shell_declares_structural_accessibility_roles`，断言
+  `window.is_a11y_enabled()` 且外壳声明了结构角色；Compose 侧多个页面使用 `contentDescription`
+  （邀请、黑名单、活动、文件、Exit 等），但 `android/app/src/test` 下没有等在语义树上的自动断言，
+  TalkBack 走查也没有记录；
 - **未支持平台（第 8 条）**：W17-01～W17-08 全为未开始，平台支持表尚不存在，不勾。
 
 ### W18-10 可复现构建与发布产物 `[ ]`

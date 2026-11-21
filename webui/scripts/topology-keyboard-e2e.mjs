@@ -753,9 +753,13 @@ async function main() {
       await evaluate(cdp, `document.querySelector(".topology-view")?.dataset.view`),
       "graph",
     );
+    // The graph renders the members of the selected network: `home` has the local
+    // node and Bob, while Carol belongs to `studio` only. Layout placements are
+    // produced per visible network, so a node from another network is absent here
+    // by design rather than by a rendering bug.
     assert.equal(
       await evaluate(cdp, `document.querySelectorAll("g.topology-node[role=option]").length`),
-      3,
+      2,
     );
     const selfAriaLabel = await evaluate(
       cdp,
@@ -765,6 +769,7 @@ async function main() {
     assert.match(selfAriaLabel, /Healthy/);
     assert.match(selfAriaLabel, /Relay/);
     assert.match(selfAriaLabel, /Connections: Active 1/);
+    checks.push("graph renders the selected network's members only");
     checks.push("graph exposes object name, capability, network and relationship summary");
 
     assert.equal(

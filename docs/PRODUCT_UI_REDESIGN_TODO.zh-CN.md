@@ -4803,7 +4803,7 @@ node 进程**，那个孙进程仍持有管道写端，EOF 永不到来。现在
 - [x] i18n 键完整性、伪本地化和截断通过；
 - [ ] 可访问性自动与人工测试通过；
 - [ ] 构建产物嵌入单一二进制并可离线加载；
-- [ ] 构建哈希绑定 commit。
+- [x] 构建哈希绑定 commit。
 
 **验收**：新 React/Vite 表面是唯一产品 WebUI，所有门禁无跳过。
 
@@ -4824,8 +4824,14 @@ node 进程**，那个孙进程仍持有管道写端，EOF 永不到来。现在
   其中 `snapshot-worker` 文件名随哈希更新。
 
 未完成部分：仓库没有 Playwright 依赖与用例，"Playwright E2E" 一条仍空；可访问性检查是脚本化的
-DOM/契约断言，人工屏幕阅读器走查没有证据；"构建哈希绑定 commit" 需要在构建产物里写入 commit 摘要，
-当前 Vite 配置未做。
+DOM/契约断言，人工屏幕阅读器走查没有证据；"构建产物嵌入单一二进制并可离线加载"只有构建与嵌入两步
+成立，离线加载本身没有独立用例。
+
+**补充（2026-11-21，构建哈希绑定 commit）**：`webui/vite.config.ts` 在构建时用
+`git rev-parse --short=12 HEAD` 注入 `__FUCKIPV6_BUILD_COMMIT__`（在非 checkout 环境退化为
+`unknown` 而不是让构建失败），`main.tsx` 把它写到 `document.documentElement.dataset.buildCommit`。
+`dist/assets/app.js` 因此自带 `buildCommit="2ec311aec69e"`，产物本身携带可追溯来源，不依赖 sidecar 文件；
+typecheck、lint、349 项单测与 i18n 检查在该改动后仍通过。
 
 ### W18-04 Schema 与兼容闸门 `[ ]`
 

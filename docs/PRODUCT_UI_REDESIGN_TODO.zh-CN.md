@@ -3177,8 +3177,15 @@ ICMP 5/5、TCP 262144 字节、UDP 64 包、虚拟 MTU 1280 边界）。逐例�
 三 netns 正式邀请入网（Coordinator 与两个成员，direct P2P），每周期采集：双方 peer 健康与 P2P 计数/错误数、
 双向 5 包 ICMP、每 300 秒 TCP 65536 字节 canary、节点与控制进程 RSS/FD、runtime 临时文件计数；输出
 `soak/metrics.jsonl`、`soak/events.jsonl`、`soak/run-state.json`，结束时写 `soak/summary.json`。
-本实例于 2026-11-20T10:34Z 启动（`W12_SOAK_WORK=/tmp/w12-soak-24h`，24 小时、60 秒周期、300 秒 canary），
-cycle 7 时双向 P2P 均 healthy、ICMP 5/5、canary 12/12 通过、RSS/FD 采样正常；短周期预演（12 周期）verdict=ok。
+**第一次浸泡（失败，已记录）**：2026-11-20T10:34Z 启动的实例（`/tmp/w12-soak-24h`）在 cycle 434 /
+25,982 s（约 7.2 小时）后随其父会话一起被终止，没有写出 `summary.json`；内核日志无 OOM 记录，最后心跳
+`2026-11-20T17:45:20Z`，`metrics.jsonl` 停在同一点。结论：用 `nohup setsid` 挂在交互 shell 下仍不能保证 24 小时
+生存，后续应改用 `systemd-run --unit=… --collect` 之类的独立单元。
+
+**第二次浸泡（进行中）**：2026-11-21T00:19Z 启动（`/tmp/w12-soak-24h-r3`，同参数），截至本次检查 cycle 622 /
+37,262 s（约 10.3 小时），双向 P2P healthy、ICMP 5/5、canary 无失败，RSS 21.9–22.3 MB、FD 79、runtime 文件 23
+个均稳定；计划结束时间 2026-11-22T00:19Z。只有跑满 24 小时且 `summary.verdict == "ok"` 时才会勾选本项，
+当前仍未勾选。
 只有满 24 小时、`summary.verdict == "ok"`、无 peer/ICMP/canary 失败且 RSS/FD/临时文件无持续增长时，才勾选本项。
 
 **2026-11-21 浸泡中断与 7.2 小时实测记录**：该实例在运行到 cycle 434、`elapsed_seconds=25982.373`

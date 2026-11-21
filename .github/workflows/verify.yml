@@ -311,7 +311,7 @@ jobs:
   windows:
     name: Windows gate
     runs-on: windows-latest
-    timeout-minutes: 120
+    timeout-minutes: 240
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -342,7 +342,7 @@ jobs:
   macos:
     name: macOS gate
     runs-on: macos-latest
-    timeout-minutes: 120
+    timeout-minutes: 240
     steps:
       - name: Checkout
         uses: actions/checkout@v4

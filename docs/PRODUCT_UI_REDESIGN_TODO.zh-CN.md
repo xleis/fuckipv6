@@ -4914,12 +4914,16 @@ WebUI 195.6875），真正偏差是两段：
 （本机是高度差 96 px、CI 是高度一致但整体下移 73 px），说明该页布局正处在两端同时改动之中，
 不宜按单次快照对齐。两段数值都留档，等两端设计 owner 定侧后再改。
 
-**补充（2026-11-21，键盘/触控 E2E 脚本未随导航契约更新）**：`webui/scripts/topology-keyboard-e2e.mjs`
-在本地 `xvfb-run -a node webui/scripts/topology-keyboard-e2e.mjs` 下构建通过、Chrome 会话建立，
-但 `navigateToTopologyWithKeyboard` 在 `waitFor` 处超时：按键盘 Tab 到 "Networks" 模块并回车后，
-`[role="tab"]` 集合里等不到 "Topology"。同一份脚本还承载长按/右键与焦点恢复用例。这与
-`test_webui_accessibility.mjs` 此前的失败同源——导航契约在加入 `activity`、`files` 两页后变了，
-脚本仍按旧页集断言。第 4 条因此不勾：不是产品缺陷证据，而是脚本需要按新导航重写等待条件。
+**补充（2026-11-21，键盘/触控 E2E 脚本已修导航、仍有一处语义待定）**：`webui/scripts/topology-keyboard-e2e.mjs`
+原先按 `[role="tab"]` 等 "Topology"，而外壳渲染的是 `<details class="page-switcher">` 加
+`role="menuitemradio"` 的页面切换器——旧等待条件永远匹配不到，表现为 `waitFor` 超时。现在脚本
+用键盘打开该 disclosure 并用 Enter 选中条目，**键盘-only 导航到 Networks > Topology 已经通过**。
+
+随后脚本在下一个断言失败：`g.topology-node[role=option]` 期望 3 个、实际渲染 2 个。脚本自己的
+fixture 里有 3 个节点（`node-self`、`node-bob` 与第三个），其中 Bob 同时属于 `home` 与 `studio`。
+因此这处差异指向"拓扑是否按当前选中网络过滤节点"的语义，而不是脚本笔误——在语义定下来之前
+改断言会把真实行为变化掩盖成通过。第 4 条仍不勾：导航已修复，节点数与长按/右键/焦点恢复三段
+仍需按最终语义校对。
 
 ### W18-06 网络质量与抗干扰证据 `[ ]`
 

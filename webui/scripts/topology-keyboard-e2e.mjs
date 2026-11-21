@@ -609,15 +609,29 @@ async function navigateToTopologyWithKeyboard(session) {
   const focusedNetworks = await activeElement(session);
   assert.equal(focusedNetworks?.text, "Networks");
   await pressKey(session, "Enter");
+  // The page switcher is a <details> disclosure with menuitemradio entries, not a
+  // tablist: the old tab-based wait could never match once the shell switched to
+  // this control.
   await waitFor(
     session,
-    `[...document.querySelectorAll('[role="tab"]')].some((element) => element.textContent?.trim() === "Topology")`,
-    "Topology page tab",
+    `Boolean(document.querySelector(".page-switcher"))`,
+    "page switcher",
   );
   await tabTo(
     session,
-    `el?.getAttribute("role") === "tab" && el.textContent?.trim() === "Topology"`,
-    "Topology tab",
+    `el?.tagName === "SUMMARY" && Boolean(el.closest(".page-switcher"))`,
+    "page switcher trigger",
+  );
+  await pressKey(session, "Enter");
+  await waitFor(
+    session,
+    `[...document.querySelectorAll('.page-switcher-menu [role="menuitemradio"]')].some((element) => element.textContent?.trim() === "Topology")`,
+    "Topology page entry",
+  );
+  await tabTo(
+    session,
+    `el?.getAttribute("role") === "menuitemradio" && el.textContent?.trim() === "Topology"`,
+    "Topology page entry",
   );
   await pressKey(session, "Enter");
   await waitFor(

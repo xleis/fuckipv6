@@ -106,7 +106,7 @@ class FileTransferControllerTest {
             open = { ByteArrayInputStream(ByteArray(0)) },
         )
         val state = await(controller) { it.errorKey != null }
-        assertEquals("file.page.error.missing_filename", state.errorKey)
+        assertEquals("file.page.error.unsupported_detail", state.errorKey)
         assertEquals(0, source.uploadCalls)
     }
 
@@ -146,5 +146,13 @@ class FileTransferControllerTest {
         controller.resume(running)
         await(controller) { source.controls.size == 2 }
         assertEquals(listOf("pause:t-1:op-1", "resume:t-1:op-1"), source.controls)
+    }
+
+    @Test
+    fun aLocallyDetectedProblemReachesTheSameSurfaceAsANodeError() {
+        val controller = FileTransferController(FakeTransfers(), CoroutineScope(Dispatchers.Unconfined))
+        controller.reportClientError("file.page.error.invalid_filename_detail")
+        assertEquals("file.page.error.invalid_filename_detail", controller.state().value.errorKey)
+        assertEquals(false, controller.state().value.busy)
     }
 }

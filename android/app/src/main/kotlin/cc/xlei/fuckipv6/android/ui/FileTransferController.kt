@@ -61,13 +61,20 @@ class FileTransferController(
         }
     }
 
+    /** Reports a locally-detected problem (bad pick, unknown size) on the same surface. */
+    fun reportClientError(key: String) {
+        state.value = state.value.copy(busy = false, errorKey = key)
+    }
+
     fun upload(
         request: TransferRequest,
         contentLength: Long,
         open: () -> InputStream,
     ) {
+        // A length the provider could not report and an invalid negative length
+        // are different problems; neither may silently do nothing.
         if (contentLength < 0) {
-            state.value = state.value.copy(errorKey = "file.page.error.missing_filename")
+            state.value = state.value.copy(errorKey = "file.page.error.unsupported_detail")
             return
         }
         state.value = state.value.copy(busy = true, errorKey = null)

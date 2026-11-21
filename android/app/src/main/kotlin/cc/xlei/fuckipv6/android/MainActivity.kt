@@ -586,10 +586,17 @@ class MainActivity : ComponentActivity() {
         val config = apiConfig ?: return
         val current = browseController?.state()?.value ?: return
         val target = current.selected ?: return
-        val length = contentResolver.uploadLength(uri) ?: return
+        val length = contentResolver.uploadLength(uri)
+        if (length == null) {
+            // Nothing to send: the provider hid the size, and guessing one would
+            // corrupt the upload. Say so instead of looking like a dead button.
+            transferController?.reportClientError("file.page.error.unsupported_detail")
+            return
+        }
         val name = contentResolver.displayName(uri)
         val path = FileTransferNaming.uploadTargetPath(current.path, name)
         if (path == null) {
+            transferController?.reportClientError("file.page.error.invalid_filename_detail")
             return
         }
         transferController?.upload(
@@ -602,8 +609,11 @@ class MainActivity : ComponentActivity() {
             contentLength = length,
             open = { contentResolver.openUploadSource(uri) },
         )
-        // Keep the compiler honest about the unused config in this path.
-        check(config.isValid)
+        // `config` is only read through the controller's transport; keep the
+        // validity check non-throwing so a stale config cannot crash the picker.
+        if (!config.isValid) {
+            transferController?.reportClientError("file.page.error.unsupported_detail")
+        }
     }
 
     /**

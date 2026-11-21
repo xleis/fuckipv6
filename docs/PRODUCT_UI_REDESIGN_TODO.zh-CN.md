@@ -4866,6 +4866,13 @@ WebUI 195.6875），真正偏差是两段：
 （本机是高度差 96 px、CI 是高度一致但整体下移 73 px），说明该页布局正处在两端同时改动之中，
 不宜按单次快照对齐。两段数值都留档，等两端设计 owner 定侧后再改。
 
+**补充（2026-11-21，键盘/触控 E2E 脚本未随导航契约更新）**：`webui/scripts/topology-keyboard-e2e.mjs`
+在本地 `xvfb-run -a node webui/scripts/topology-keyboard-e2e.mjs` 下构建通过、Chrome 会话建立，
+但 `navigateToTopologyWithKeyboard` 在 `waitFor` 处超时：按键盘 Tab 到 "Networks" 模块并回车后，
+`[role="tab"]` 集合里等不到 "Topology"。同一份脚本还承载长按/右键与焦点恢复用例。这与
+`test_webui_accessibility.mjs` 此前的失败同源——导航契约在加入 `activity`、`files` 两页后变了，
+脚本仍按旧页集断言。第 4 条因此不勾：不是产品缺陷证据，而是脚本需要按新导航重写等待条件。
+
 ### W18-06 网络质量与抗干扰证据 `[ ]`
 
 - [x] Exit 真实访问 Google/YouTube；

@@ -4752,6 +4752,14 @@ Android 单测共 146 项通过。W16-01 仍缺真机验收，保持 `[ ]`。
   `app.js` 已达 1,051,364 字节，`node_adapter_selects_manifest_surface_and_serves_embedded_assets`
   以 `LengthLimitError` 失败；上限提高到 16 MiB 后该用例通过。
 
+**补充（2026-11-21，CI 的 `test` 步骤为什么从不结束）**：Linux gate 的 `test` 从 8 分钟涨到 147 分钟并
+被 150 分钟时限 cancelled，而日志显示断言其实早已通过——`running 1568 tests` 一步就报
+`1565 passed / 0 failed`，随后 `w2_runtime_process` 的 11 个用例再也不出结果。根因是本轮自己引入的
+诊断代码：握手失败时先 kill 直接子进程、再把 piped stderr 读到 EOF，而 control 会**故意 detach 一个
+node 进程**，那个孙进程仍持有管道写端，EOF 永不到来。现在 stderr 在 spawn 时重定向到
+`node-stderr.log`，诊断改为读文件（不会阻塞），本机 headless 复跑 11/11 通过（3.33 s）。
+教训记录在此：测试基建里的阻塞读比断言失败更难发现，因为它表现为"卡住"而不是"红"。
+
 ### W18-03 前端质量门禁 `[ ]`
 
 - [x] TypeScript 严格类型检查通过；

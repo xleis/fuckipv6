@@ -274,7 +274,7 @@ async fn wait_for_new_pid(path: &Path, previous: u32) -> Result<u32> {
     anyhow::bail!("进程锁 {} 未在期限内出现新 PID", path.display())
 }
 
-async fn wait_for_webui(port: u16) -> Result<()> {
+async fn wait_for_webui(port: u16, guard: &mut ProcessGuard) -> Result<()> {
     for _ in 0..600 {
         if tokio::time::timeout(
             Duration::from_millis(250),
@@ -285,9 +285,32 @@ async fn wait_for_webui(port: u16) -> Result<()> {
         {
             return Ok(());
         }
+        if let Some(status) = guard.child.try_wait()? {
+            let stderr = drain_stderr(guard);
+            anyhow::bail!(
+                "WebUI 未在期限内监听 127.0.0.1:{port}：子进程已以 {status} 退出\nstderr:\n{stderr}"
+            );
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    anyhow::bail!("WebUI 未在期限内监听 127.0.0.1:{port}")
+    let _ = guard.child.kill();
+    let _ = guard.child.wait();
+    let stderr = drain_stderr(guard);
+    anyhow::bail!("WebUI 未在期限内监听 127.0.0.1:{port}\nstderr:\n{stderr}")
+}
+
+/// A failed handshake is only diagnosable with the child's own words, so the
+/// guard is drained once the process is known to be dead.
+fn drain_stderr(guard: &mut ProcessGuard) -> String {
+    guard
+        .child
+        .stderr
+        .take()
+        .map(|mut stream| std::io::read_to_string(&mut stream))
+        .transpose()
+        .ok()
+        .flatten()
+        .unwrap_or_default()
 }
 
 async fn wait_for_process_exit(pid: u32) -> Result<()> {
@@ -390,7 +413,7 @@ async fn service_process_owns_control_and_stops_node_on_termination() -> Result<
 
     let mut service = spawn_service(&directory, port)?;
     let service_pid = service.child.id();
-    wait_for_webui(port).await?;
+    wait_for_webui(port, &mut service).await?;
     wait_until_ready(&node_endpoint).await?;
     assert_eq!(
         read_pid(&control_lock)?,
@@ -430,7 +453,7 @@ async fn closing_headless_webui_does_not_stop_the_node() -> Result<()> {
     let mut ui = spawn_headless_ui(&directory, port)?;
     let ui_pid = ui.child.id();
     wait_until_ready(&node_endpoint).await?;
-    wait_for_webui(port).await?;
+    wait_for_webui(port, &mut ui).await?;
 
     let control_pid = read_pid(&runtime_dir.join("control.lock"))?;
     let node_pid = read_pid(&runtime_dir.join("node.lock"))?;
@@ -480,7 +503,7 @@ async fn stopping_data_plane_keeps_control_and_webui_available() -> Result<()> {
 
     let mut ui = spawn_headless_ui(&directory, port)?;
     wait_until_ready(&node_endpoint).await?;
-    wait_for_webui(port).await?;
+    wait_for_webui(port, &mut ui).await?;
 
     let control_pid = read_pid(&runtime_dir.join("control.lock"))?;
     let node_pid = read_pid(&runtime_dir.join("node.lock"))?;
@@ -529,7 +552,7 @@ async fn stopping_data_plane_keeps_control_and_webui_available() -> Result<()> {
         node_pid,
         "停止数据面后重启了 node IPC 进程"
     );
-    wait_for_webui(port).await?;
+    wait_for_webui(port, &mut ui).await?;
 
     send_signal(control_pid, "TERM")?;
     wait_for_process_exit(control_pid).await?;
@@ -601,7 +624,7 @@ async fn new_headless_ui_restarts_crashed_control_and_adopts_live_node() -> Resu
 
     let mut first_ui = spawn_headless_ui(&directory, first_port)?;
     wait_until_ready(&node_endpoint).await?;
-    wait_for_webui(first_port).await?;
+    wait_for_webui(first_port, &mut first_ui).await?;
 
     let first_control_pid = read_pid(&control_lock)?;
     let node_pid = read_pid(&node_lock)?;
@@ -627,7 +650,7 @@ async fn new_headless_ui_restarts_crashed_control_and_adopts_live_node() -> Resu
         .port();
     let mut second_ui = spawn_headless_ui(&directory, second_port)?;
     let replacement_control_pid = wait_for_new_pid(&control_lock, first_control_pid).await?;
-    wait_for_webui(second_port).await?;
+    wait_for_webui(second_port, &mut second_ui).await?;
     wait_until_ready(&node_endpoint).await?;
 
     assert!(
@@ -681,7 +704,7 @@ async fn headless_command_entrypoint_reexports_the_same_control() -> Result<()> 
 
     let mut ui = spawn_headless_up_ui(&directory, port)?;
     wait_until_ready(&node_endpoint).await?;
-    wait_for_webui(port).await?;
+    wait_for_webui(port, &mut ui).await?;
 
     let control_pid = read_pid(&runtime_dir.join("control.lock"))?;
     let node_pid = read_pid(&runtime_dir.join("node.lock"))?;

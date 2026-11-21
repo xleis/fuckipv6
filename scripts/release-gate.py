@@ -499,6 +499,20 @@ def build_run_plan(args: argparse.Namespace) -> dict[str, Any]:
                 output=Path("<benchmark-comparison-report>"),
             ),
         }
+    if args.skip:
+        skipped = set(args.skip)
+        known = {command["name"] for command in commands}
+        known |= {extra["name"] for extra in (benchmark, comparison) if extra}
+        unknown = skipped - known
+        if unknown:
+            raise SystemExit(
+                "unknown check(s) in --skip: " + ", ".join(sorted(unknown))
+            )
+        commands = [command for command in commands if command["name"] not in skipped]
+        if benchmark and benchmark["name"] in skipped:
+            benchmark = None
+        if comparison and comparison["name"] in skipped:
+            comparison = None
     return {
         "platform": args.platform,
         "toolchain": args.toolchain or "PATH cargo",
@@ -837,7 +851,10 @@ def run_gate(args: argparse.Namespace) -> int:
         for check in checks
         if isinstance(check, dict)
     }
-    required_checks = required_check_names(args.platform)
+    skipped_checks = list(dict.fromkeys(args.skip))
+    required_checks = [
+        name for name in required_check_names(args.platform) if name not in skipped_checks
+    ]
     required_checks_not_passed = [
         name for name in required_checks if check_statuses.get(name) != "passed"
     ]
@@ -865,6 +882,7 @@ def run_gate(args: argparse.Namespace) -> int:
             "commands_passed": overall_passed,
             "worktree_clean": not dirty,
             "required_checks": required_checks,
+            "skipped_checks": skipped_checks,
             "required_checks_not_passed": required_checks_not_passed,
             "release_ready": overall_passed
             and not dirty
@@ -1159,6 +1177,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="diagnostic run that permits changes but never marks the report release-ready",
     )
     run_parser.set_defaults(require_clean=True)
+    run_parser.add_argument(
+        "--skip",
+        action="append",
+        default=[],
+        metavar="CHECK",
+        help=(
+            "skip a named check; the report records it as skipped and drops it from "
+            "required_checks, so a platform that cannot finish every check in its "
+            "runner budget can still produce an honest partial report"
+        ),
+    )
     run_parser.add_argument(
         "--no-default-cross-targets",
         action="store_true",

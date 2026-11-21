@@ -5109,7 +5109,7 @@ runtime dir），不是环境变量，因此 unset 变量并不能伪造无头�
 
 ### W18-09 平台发布门禁 `[ ]`
 
-- [ ] Linux 实机报告；
+- [x] Linux 实机报告；
 - [ ] macOS 实机报告；
 - [ ] Windows 实机报告；
 - [ ] Android 真机报告；
@@ -5123,7 +5123,15 @@ runtime dir），不是环境变量，因此 unset 变量并不能伪造无头�
 **证据（2026-11-21，CI 平台门禁首次可跑与 Linux 本机复验）**：本条的八项都还没有一份可直接引用的平台报告，但阻塞性质已经变了——此前这些门禁连构建都进不去，现在它们只是在时限内跑不完：
 
 - **门禁可跑性**：Verify 的 `contracts`、`governance`、`api-security`、`gpui-smoke`、`supply-chain`、`docs`、`android` 七个 job 在同一提交上为 success（run `44857799539`）。这说明 GPUI/Android 的平台依赖链（fontconfig、freetype、xcb、xkbcommon、xdotool、JDK 21 + SDK 36）已经齐全，平台报告缺的是运行时长而不是环境；
-- **Linux（第 1 条）**：本机以 `python3 scripts/release-gate.py run --platform linux --toolchain stable --allow-dirty --benchmark none` 复跑，`format`/`docs`/`helper-tests`/`single-binary`/`check`/`test`/`release-build`/`lifecycle-cleanup`（含 route、dns、tun、exit-rules）/两条交叉检查/`stable-source`/`benchmark` 全部 passed；随后的 `cargo clippy --workspace --all-targets --all-features -- -D warnings` 也为 exit 0。CI 的 Linux job 由于 60 分钟时限被 cancelled，时限已提到 150 分钟，待复跑转绿后第 1 条才可勾。注意这只是本机 Linux，不是"实机报告"意义上的目标机型矩阵；
+- **Linux（第 1 条，勾）**：证据有两份且相互独立——本机以
+  `python3 scripts/release-gate.py run --platform linux --toolchain stable --allow-dirty --benchmark none`
+  复跑，每一步 passed；CI 的 Linux gate 在 run `44898897628`（commit `30bc624`）上首次全绿：
+  `format` 4.9s、`helper-tests` 0.2s、`single-binary` 0.07s、`docs` 0.17s、`check` 194.5s、
+  `test` 667.5s、`lifecycle-cleanup` 134.6s、`clippy` 63.8s、`release-build` 818.1s、
+  `cross-check-x86_64-unknown-linux-musl` 169.9s、`cross-check-x86_64-pc-windows-gnu` 185.9s、
+  四个 `lifecycle-cleanup-*` 子项与 `benchmark` 39.3s 全 PASS。范围说明：本机是 Arch Linux /
+  kernel 7.3.4-zen2，**不在**支持发行版矩阵内（因此 W17-01 第 1 条仍不勾），CI 是 Ubuntu runner；
+  本条勾的是"Linux 这份报告存在且通过"，发行版矩阵由 W17-01 承担；
 - **macOS / Windows（第 2、3 条）**：两者此前都在 120 分钟时限被 cancelled，现为 240 分钟。这两个平台此前从未产出过一份报告，因此第 2、3 条没有任何可引用证据，不勾；
 - **Android（第 4 条）**：CI 的 Android job 已通过（JDK 21、共享 i18n 字面量检查、单测、lint、debug 构建），但 W16-08 的真机 E2E 与 W16-02 的前台 VpnService 仍未执行，第 4 条不勾；
 - **可访问性（第 7 条）**：三端证据不齐，因此不勾——WebUI 侧 `scripts/test_webui_accessibility.mjs`

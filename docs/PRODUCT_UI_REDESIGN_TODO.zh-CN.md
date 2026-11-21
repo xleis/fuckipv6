@@ -5105,7 +5105,7 @@ runtime dir），不是环境变量，因此 unset 变量并不能伪造无头�
 - [ ] WebUI/Android 资产哈希记录；
 - [x] SBOM/许可证清单；
 - [ ] 发布说明列出能力、限制和迁移；
-- [ ] 二进制不包含测试秘密或开发凭据；
+- [x] 二进制不包含测试秘密或开发凭据；
 - [x] 发布产物与 commit 对应；
 
 **验收**：第三方可从记录环境复现构建并验证发布产物来源。
@@ -5120,12 +5120,17 @@ runtime dir），不是环境变量，因此 unset 变量并不能伪造无头�
 - **第 8 条**：provenance 里写 `fuckipv6:source-commit` 与 `vcs` 外部引用（指向 `{repo}/tree/{commit}`），
   SPDX namespace 也以 commit 为种子，因此产物与 commit 一一对应。
 
-其余五条不勾，缺口逐条列出：**第 2 条**工作流用 `dtolnay/rust-toolchain@stable`，stable 不 pin 具体版本，
+**第 7 条（2026-11-21 补）**：新增 `scripts/check-release-binary-secrets.sh`，对编译产物扫描 PEM 私钥头、
+GitHub/OpenSSH/AWS/Slack token 形态，以及仓库根 `client_key.pem` 的实际密钥体；三条平台 package job
+在生成 SBOM 前都调用它。当前 `target/release/fuckipv6` 通过。注意 `client_key.pem`/`client.toml`/
+`coordinator.toml` 本身**未被 Git 跟踪**（在 `.gitignore` 内），因此风险只来自误嵌入，而扫描正是针对这一点；
+Coordinator 旧 WebUI 里出现 `client_key.pem` 字样是 HTML 示例文本，不是凭据，故未列入模式。
+
+其余四条不勾，缺口逐条列出：**第 2 条**工作流用 `dtolnay/rust-toolchain@stable`，stable 不 pin 具体版本，
 不满足"工具链固定"；**第 3 条**脚本自述"does not sign artifacts or produce a SLSA attestation"，
 只有校验和与未签名 provenance；**第 4 条**`dist` 里没有 WebUI/Android 资产的独立哈希记录，构建产物
 `app.js` 目前只是随源码提交；**第 6 条**发布说明停留在 CHANGELOG 的自由文本，没有"能力/限制/迁移"
-结构化清单；**第 7 条**没有任何步骤检查二进制里是否残留测试秘密或开发凭据（`client_key.pem`、
-`client.toml`、`coordinator.toml` 仍在仓库根）。
+结构化清单。
 
 ### W18-11 发布阻断逐项签核 `[ ]`
 

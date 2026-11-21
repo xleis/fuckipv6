@@ -62,6 +62,10 @@ jobs:
           cp scripts/install-node.sh scripts/fuckipv6.service "dist/${package}/scripts/"
           tar -C dist -czf "dist/${package}.tar.gz" "${package}"
 
+      - name: Scan the binary for development credentials
+        shell: bash
+        run: ./scripts/check-release-binary-secrets.sh target/release/fuckipv6
+
       - name: Generate SBOM, provenance, and checksums
         shell: bash
         run: |
@@ -128,6 +132,10 @@ jobs:
           cp setup_windows.ps1 setup_windows.bat README_WINDOWS.md QUICKSTART_WINDOWS.md WINDOWS_TEST_CHECKLIST.md "dist/${package}/"
           cp examples/node.toml.example "dist/${package}/"
           (cd dist && zip -r "${package}.zip" "${package}")
+
+      - name: Scan the binary for development credentials
+        shell: bash
+        run: ./scripts/check-release-binary-secrets.sh target/release/fuckipv6
 
       - name: Generate SBOM, provenance, and checksums
         shell: bash
@@ -201,6 +209,10 @@ jobs:
           cp examples/node.toml.example "dist/${package}/examples/"
           cp scripts/install-macos-node.sh scripts/fuckipv6.plist "dist/${package}/"
           tar -C dist -czf "dist/${package}.tar.gz" "${package}"
+
+      - name: Scan the binary for development credentials
+        shell: bash
+        run: ./scripts/check-release-binary-secrets.sh target/release/fuckipv6
 
       - name: Generate SBOM, provenance, and checksums
         shell: bash

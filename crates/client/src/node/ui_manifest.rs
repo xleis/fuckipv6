@@ -3632,6 +3632,46 @@ mod tests {
         assert!(!visible.contains(&NodeCommandKind::GetUiManifest));
     }
 
+    /// Emit the page→action→command→permission→backend-status table that the
+    /// release audit (W18-01) consumes, next to the other gate artifacts. The
+    /// test asserts only that the table is non-empty and covers every page, so a
+    /// manifest change cannot silently shrink it.
+    #[test]
+    fn writes_the_action_evidence_table() {
+        let manifest = node_ui_manifest();
+        let mut rows = vec![
+            "page\taction\tcommand\tpermission\taudit\tbackend_status\tavailability".to_string(),
+        ];
+        for page in &manifest.pages {
+            for action in &page.actions {
+                rows.push(format!(
+                    "{}\t{}\t{}\t{:?}\t{:?}\t{:?}\t{:?}",
+                    page.id,
+                    action.id,
+                    action.command.as_str(),
+                    action.permission,
+                    action.audit,
+                    action.backend_status,
+                    action.availability,
+                ));
+            }
+        }
+        assert_eq!(
+            rows.len() - 1,
+            manifest
+                .pages
+                .iter()
+                .map(|page| page.actions.len())
+                .sum::<usize>()
+        );
+        assert!(rows.len() > manifest.pages.len());
+        let directory =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/w18-ui-audit");
+        std::fs::create_dir_all(&directory).expect("create the audit directory");
+        std::fs::write(directory.join("actions.tsv"), rows.join("\n") + "\n")
+            .expect("write the action evidence table");
+    }
+
     #[test]
     fn manifest_backend_status_matches_the_live_command_handler() {
         let manifest = node_ui_manifest();

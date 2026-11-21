@@ -204,7 +204,16 @@ class TypeScriptGenerator:
                 continue
             values = definition.get("enum")
             if not isinstance(values, list) or not values:
-                continue
+                # `schemars` renders a documented enum as oneOf of const values,
+                # which is the same information in a different shape.
+                one_of = definition.get("oneOf")
+                if isinstance(one_of, list) and one_of and all(
+                    isinstance(candidate, dict) and "const" in candidate
+                    for candidate in one_of
+                ):
+                    values = [candidate["const"] for candidate in one_of]
+                else:
+                    continue
             constant = re.sub(r"(?<!^)(?=[A-Z])", "_", name).upper() + "_VALUES"
             value_arrays.append(
                 f"export const {constant} = "

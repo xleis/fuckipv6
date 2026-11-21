@@ -58,10 +58,12 @@ import type {
 import {
   ADMIN_RECOVERY_STATE_VALUES,
   CAPABILITY_KIND_VALUES,
+  EXIT_CONTRIBUTION_MODE_VALUES,
   EXIT_CONTRIBUTION_OBLIGATION_VALUES,
   MEMBERSHIP_ROLE_VALUES,
   MEMBER_LIFECYCLE_ACTION_VALUES,
   MEMBER_LIFECYCLE_STATUS_VALUES,
+  NETWORK_JOIN_MODE_VALUES,
   NETWORK_MEMBER_GROUP_VALUES,
   NETWORK_MEMBER_OBSERVATION_SOURCE_VALUES,
   NETWORK_MEMBER_ONLINE_STATE_VALUES,
@@ -73,6 +75,7 @@ import {
   NODE_PERMISSION_VALUES,
   NODE_PHASE_VALUES,
   NODE_UI_AVAILABILITY_VALUES,
+  NODE_UI_BACKEND_STATUS_VALUES,
   NODE_UI_INPUT_KIND_VALUES,
   NODE_UI_VALIDATION_VALUES,
   OPERATION_STATE_VALUES,
@@ -82,10 +85,12 @@ import {
   POLICY_RISK_LEVEL_VALUES,
   POLICY_RISK_REASON_VALUES,
   TRAFFIC_FAILURE_DECISION_REASON_VALUES,
+  TRAFFIC_FAILURE_KIND_VALUES,
   TRAFFIC_FAILURE_OUTCOME_VALUES,
   TRAFFIC_POLICY_CHANGE_KIND_VALUES,
   TRAFFIC_POLICY_HISTORY_OUTCOME_VALUES,
   TRAFFIC_POLICY_OBJECT_KIND_VALUES,
+  TRAFFIC_PROTECTION_STATE_VALUES,
   TRAFFIC_SESSION_EVENT_KIND_VALUES,
   TUN_CAPABILITY_REASON_VALUES,
 } from "../../../contracts/typescript/node-contract-v1";
@@ -240,7 +245,7 @@ const EXPECTED_ACTIONS: Record<string, string> = {
 
 const PERMISSIONS = new Set<string>(NODE_PERMISSION_VALUES);
 const AVAILABILITIES = new Set<string>(NODE_UI_AVAILABILITY_VALUES);
-const BACKEND_STATUSES = new Set(["implemented", "unavailable"]);
+const BACKEND_STATUSES = new Set<string>(NODE_UI_BACKEND_STATUS_VALUES);
 const OPERATION_STATES = new Set<string>(OPERATION_STATE_VALUES);
 const OPERATION_TERMINAL_STATES = new Set([
   "succeeded",
@@ -318,11 +323,7 @@ const MEMBER_REMOVAL_IMPACT_KEYS = new Set([
 const CAPABILITY_KINDS = new Set<string>(CAPABILITY_KIND_VALUES);
 const NETWORK_PROFILE_WARNING_CODES = new Set<string>(NETWORK_PROFILE_WARNING_CODE_VALUES);
 const NETWORK_VISIBILITIES = new Set<string>(NETWORK_VISIBILITY_VALUES);
-const NETWORK_JOIN_MODES = new Set([
-  "open",
-  "approval_required",
-  "invite_only",
-]);
+const NETWORK_JOIN_MODES = new Set<string>(NETWORK_JOIN_MODE_VALUES);
 type ExitContributionMode =
   "autonomous" | "required_on_join" | "disabled" | "approval_required";
 type ExitContributionScope =
@@ -348,12 +349,7 @@ function canonicalExitContribution(
 }
 
 const EXIT_CONTRIBUTION_OBLIGATIONS = new Set<string>(EXIT_CONTRIBUTION_OBLIGATION_VALUES);
-const EXIT_CONTRIBUTION_MODES = new Set([
-  "autonomous",
-  "required_on_join",
-  "disabled",
-  "approval_required",
-]);
+const EXIT_CONTRIBUTION_MODES = new Set<string>(EXIT_CONTRIBUTION_MODE_VALUES);
 const EXIT_CONTRIBUTION_SCOPES = new Set([
   "not_applicable",
   "joining_members",
@@ -1629,26 +1625,9 @@ const TRAFFIC_POLICY_CHANGE_KINDS = new Set<string>(TRAFFIC_POLICY_CHANGE_KIND_V
 const TRAFFIC_POLICY_OBJECT_KINDS = new Set<string>(TRAFFIC_POLICY_OBJECT_KIND_VALUES);
 const TRAFFIC_POLICY_CHANGE_ACTIONS = new Set<string>(POLICY_CHANGE_ACTION_VALUES);
 const TRAFFIC_POLICY_HISTORY_OUTCOMES = new Set<string>(TRAFFIC_POLICY_HISTORY_OUTCOME_VALUES);
-const TRAFFIC_FAILURE_KINDS = new Set([
-  "unknown_application",
-  "dns_resolution_timeout",
-  "dns_pollution_detected",
-  "exit_unavailable",
-  "network_selection_unavailable",
-  "connection_timeout",
-  "handshake_interrupted",
-  "runtime_disconnected",
-  "partial_connection_failure",
-]);
+const TRAFFIC_FAILURE_KINDS = new Set<string>(TRAFFIC_FAILURE_KIND_VALUES);
 
-const TRAFFIC_PROTECTION_STATES = new Set<TrafficProtectionState>([
-  "idle",
-  "connecting",
-  "migrating",
-  "protected",
-  "fail_closed",
-  "explicit_direct_fallback",
-]);
+const TRAFFIC_PROTECTION_STATES = new Set<string>(TRAFFIC_PROTECTION_STATE_VALUES);
 
 const TRAFFIC_SESSION_EVENT_KINDS = new Set<string>(TRAFFIC_SESSION_EVENT_KIND_VALUES);
 

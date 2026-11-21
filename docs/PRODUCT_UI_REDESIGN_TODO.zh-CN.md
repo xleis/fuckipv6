@@ -4913,14 +4913,16 @@ typecheck、lint、349 项单测、build、i18n 与可访问性探针在改动�
 `NETWORK_MEMBER_GROUP_VALUES`（两个契约枚举取值相同但语义不同，各取其所指）、
 `POLICY_CHANGE_ACTIONS` 与 `TRAFFIC_POLICY_CHANGE_ACTIONS` → `POLICY_CHANGE_ACTION_VALUES`。
 `TUN_PLATFORMS` 保留本地定义，因为契约把平台表达为 inline union（`TunCapabilities` 内），没有独立值数组。
-至此 **33/43** 个集合来自生成产物。
+随后又发现 `schemars` 把"有文档注释的 string enum"渲染成 `oneOf: [{const: …}]` 而不是 `enum`，
+生成器此前直接跳过它们（`NodeUiBackendStatus` 就在其中）。生成器现在两种形态都识别，值数组从 131
+增至 **142**，前端再迁移 5 个（backend status、network join mode、exit contribution mode、
+traffic failure kind、traffic protection state）。至此 **38/43** 个集合来自生成产物。
 
-剩余 10 个仍手写（`BACKEND_STATUSES`、`OPERATION_TERMINAL_STATES`、`OUTCOME_STATUSES`、
-`MEMBER_REMOVAL_IMPACT_KEYS`、`NETWORK_JOIN_MODES`、`EXIT_CONTRIBUTION_MODES`、
-`EXIT_CONTRIBUTION_SCOPES`、`TRAFFIC_FAILURE_KINDS`、`TRAFFIC_PROTECTION_STATES`、
-`TRAFFIC_MATCH_RISK_KINDS`、`TUN_PLATFORMS`）——它们在前端是展示映射或派生判定（如"终态"是状态的
-子集、"影响键"是 i18n 键），剩下的真正重复项来自 inline union，要消除需要生成器对 inline enum
-也产出值数组。本条因此仍不勾：重复从 43 处降到 10 处，但"不手写重复领域枚举"尚未满足。
+剩余 5 个仍手写，性质各不相同：`OPERATION_TERMINAL_STATES` 是 `OperationState` 的**终态子集**（派生，
+不是第二份定义）；`OUTCOME_STATUSES` 是多个状态集的合并视图；`MEMBER_REMOVAL_IMPACT_KEYS` 是 i18n
+键而不是契约枚举；`EXIT_CONTRIBUTION_SCOPES` 与 `TRAFFIC_MATCH_RISK_KINDS` 在契约里是 inline union，
+要消除需要生成器对 inline enum 也产出值数组。本条因此仍不勾：重复从 43 处降到 5 处，而其中 3 处并非
+真正的重复定义。
 
 ### W18-05 视觉与交互回归 `[ ]`
 

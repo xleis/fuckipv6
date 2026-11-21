@@ -194,6 +194,24 @@ class TypeScriptGenerator:
             "export type NodeManifestActionCommandKind =\n"
             "  (typeof NODE_MANIFEST_ACTION_COMMAND_KINDS)[number];",
         )
+        # Every string enum in the contract gets a runtime value array, so a
+        # client can stop hand-maintaining a second copy of the same set. Names
+        # are SCREAMING_SNAKE with a _VALUES suffix to stay distinct from the type.
+        value_arrays = []
+        for name in sorted(self.contract.definitions):
+            definition = self.contract.definitions[name]
+            if not isinstance(definition, dict):
+                continue
+            values = definition.get("enum")
+            if not isinstance(values, list) or not values:
+                continue
+            constant = re.sub(r"(?<!^)(?=[A-Z])", "_", name).upper() + "_VALUES"
+            value_arrays.append(
+                f"export const {constant} = "
+                f"{json.dumps(values, ensure_ascii=False)} as const;"
+            )
+        if value_arrays:
+            aliases.append("\n".join(value_arrays))
         client = TYPESCRIPT_CLIENT
         return (
             "// Generated from contracts/schema/*.schema.json. Do not edit by hand.\n"

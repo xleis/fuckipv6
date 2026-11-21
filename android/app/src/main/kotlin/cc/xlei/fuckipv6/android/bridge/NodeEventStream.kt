@@ -35,9 +35,11 @@ class NodeEventStream(
             connection.readTimeout = 0
             connection.instanceFollowRedirects = false
             connection.setRequestProperty("Accept", "text/event-stream")
-            resumeCursor?.takeIf { it.isNotBlank() }?.let {
-                connection.setRequestProperty("Last-Event-ID", it)
-            }
+            // The URL path drops a malformed cursor; the header must agree, or the
+            // node sees an invalid resume token it would answer 400 to.
+            resumeCursor?.trim()
+                ?.takeIf { it.isNotEmpty() && isValidCursor(it) }
+                ?.let { connection.setRequestProperty("Last-Event-ID", it) }
             config.token?.takeIf { it.isNotBlank() }?.let {
                 connection.setRequestProperty("Authorization", "Bearer $it")
             }

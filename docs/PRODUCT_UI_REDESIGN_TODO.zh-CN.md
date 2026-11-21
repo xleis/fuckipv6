@@ -4802,7 +4802,7 @@ node 进程**，那个孙进程仍持有管道写端，EOF 永不到来。现在
 - [ ] Playwright E2E 通过；
 - [x] i18n 键完整性、伪本地化和截断通过；
 - [ ] 可访问性自动与人工测试通过；
-- [ ] 构建产物嵌入单一二进制并可离线加载；
+- [x] 构建产物嵌入单一二进制并可离线加载；
 - [x] 构建哈希绑定 commit。
 
 **验收**：新 React/Vite 表面是唯一产品 WebUI，所有门禁无跳过。
@@ -4824,8 +4824,15 @@ node 进程**，那个孙进程仍持有管道写端，EOF 永不到来。现在
   其中 `snapshot-worker` 文件名随哈希更新。
 
 未完成部分：仓库没有 Playwright 依赖与用例，"Playwright E2E" 一条仍空；可访问性检查是脚本化的
-DOM/契约断言，人工屏幕阅读器走查没有证据；"构建产物嵌入单一二进制并可离线加载"只有构建与嵌入两步
-成立，离线加载本身没有独立用例。
+DOM/契约断言，人工屏幕阅读器走查没有证据。
+
+**补充（2026-11-21，嵌入与离线加载）**：`webui/node_surface.rs` 用 `include_str!` 在编译期把
+`dist/index.html`、`dist/assets/app.js`、`dist/assets/app.css` 收进二进制，运行期不读文件系统；
+`node_adapter_selects_manifest_surface_and_serves_embedded_assets` 用 `oneshot` 直接向 router 请求
+`/` 与 `/assets/app.js` 并断言内容与 `Content-Type`，因此"嵌入单一二进制 + 离线加载"有独立用例。
+两个 worker（`snapshot-worker`、`topology-layout-worker`）没有走 `include_str!`，它们由浏览器按 URL
+加载；`client.ts` 对此已有失败关闭处理——worker 不可用时 `snapshotWorkerUnavailable` 置位并回退到
+主线程解析，所以离线场景不会因为缺 worker 而失效，只是失去并行解析。
 
 **补充（2026-11-21，构建哈希绑定 commit）**：`webui/vite.config.ts` 在构建时用
 `git rev-parse --short=12 HEAD` 注入 `__FUCKIPV6_BUILD_COMMIT__`（在非 checkout 环境退化为

@@ -425,6 +425,16 @@ fun PageContent(
                 LogsContent(contracts = contracts, locale = locale, feed = logs)
             pageId == "identity" && identity != null ->
                 IdentityContent(contracts = contracts, locale = locale, identity = identity)
+            pageId == "overview" ->
+                OverviewContent(
+                    contracts = contracts,
+                    locale = locale,
+                    state = state,
+                    file = files,
+                    networks = networks,
+                    peers = peers,
+                    selectedNetworkName = selectedNetworkName,
+                )
             pageId == "activity" && activity != null ->
                 ActivityContent(contracts = contracts, locale = locale, feed = activity)
             pageId == "traffic" && traffic != null ->

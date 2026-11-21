@@ -54,6 +54,23 @@ class SurfaceStateParityTest(unittest.TestCase):
         self.android = self.root / "SurfaceState.kt"
         self.webui = self.root / "state-matrix.ts"
         self.catalog = self.root / "i18n.json"
+        self.navigation = self.root / "ui-navigation.json"
+        self.pages = self.root / "FuckIpv6App.kt"
+        self.navigation.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "modules": [
+                        {"id": "m", "label_key": "nav.m", "default_page_id": "error", "page_ids": ["error", "ready"]}
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.pages.write_text(
+            'if (pageId == "error") {\n}\nif (pageId == "ready") {\n}\n',
+            encoding="utf-8",
+        )
         self.android.write_text(ANDROID, encoding="utf-8")
         self.webui.write_text(WEBUI, encoding="utf-8")
 
@@ -108,6 +125,29 @@ class SurfaceStateParityTest(unittest.TestCase):
         report = PARITY.check(self.android, self.webui, self.catalog)
         self.assertEqual(report["status"], "failed")
         self.assertTrue(any("extractor is out of date" in error for error in report["errors"]))
+
+    def test_every_navigation_page_needs_an_explicit_branch(self) -> None:
+        self.write_catalog(["error", "ready", "not_available_on_device"])
+        report = PARITY.check(
+            self.android,
+            self.webui,
+            self.catalog,
+            navigation=self.navigation,
+            android_page_source=self.pages,
+        )
+        self.assertEqual(report["status"], "passed")
+        self.assertEqual(report["navigation_pages"], ["error", "ready"])
+
+        self.pages.write_text('if (pageId == "error") {\n}\n', encoding="utf-8")
+        report = PARITY.check(
+            self.android,
+            self.webui,
+            self.catalog,
+            navigation=self.navigation,
+            android_page_source=self.pages,
+        )
+        self.assertEqual(report["status"], "failed")
+        self.assertTrue(any("ready" in error for error in report["errors"]))
 
     def test_missing_input_is_an_operational_error(self) -> None:
         self.write_catalog(["error"])

@@ -50,6 +50,8 @@ import cc.xlei.fuckipv6.android.bridge.LogsSurface
 import cc.xlei.fuckipv6.android.bridge.NetworksSurface
 import cc.xlei.fuckipv6.android.bridge.ExitSurface
 import cc.xlei.fuckipv6.android.bridge.RoutingSurface
+import cc.xlei.fuckipv6.android.bridge.BlacklistSurface
+import cc.xlei.fuckipv6.android.bridge.BlacklistView
 import cc.xlei.fuckipv6.android.bridge.TopologySurface
 import cc.xlei.fuckipv6.android.bridge.PeersSurface
 import cc.xlei.fuckipv6.android.bridge.TrafficSurface
@@ -108,6 +110,8 @@ class MainActivity : ComponentActivity() {
     private val joinRequests = MutableStateFlow<List<JoinRequestView>?>(null)
     private val invitations = MutableStateFlow<List<InvitationView>?>(null)
     private val issuedInvitationCode = MutableStateFlow<String?>(null)
+    private val blacklist = MutableStateFlow<BlacklistView?>(null)
+    private var blacklistBridge: NodeCommandBridge? = null
     private var memberNetworkId: String? = null
     private val selectedNetwork = MutableStateFlow<String?>(null)
 
@@ -173,6 +177,20 @@ class MainActivity : ComponentActivity() {
                                 memberNetworkId?.let(::refreshInvitations)
                             }
                             "invitation_revoked" -> memberNetworkId?.let(::refreshInvitations)
+                        }
+                    }
+                }
+            }
+        blacklistBridge = apiConfig
+            ?.takeIf { it.isValid }
+            ?.let { NodeCommandBridge(NodeCommandClient(it)) }
+            ?.also { bridge ->
+                bridgeScope.launch {
+                    bridge.lastOutcome().collect { outcome ->
+                        if (outcome is CommandOutcome.Succeeded &&
+                            outcome.outcomeStatus == "blacklist"
+                        ) {
+                            BlacklistSurface.parse(outcome.data)?.let { blacklist.value = it }
                         }
                     }
                 }
@@ -286,6 +304,7 @@ class MainActivity : ComponentActivity() {
                     }
                     if (networkId != null && networkId != memberNetworkId) {
                         memberNetworkId = networkId
+                        refreshBlacklist(selectedNetwork.value)
                         refreshMembers(networkId)
                         refreshJoinRequests(networkId)
                         refreshInvitations(networkId)
@@ -334,6 +353,7 @@ class MainActivity : ComponentActivity() {
             val joinRequestsState = joinRequests.collectAsState().value
             val invitationsState = invitations.collectAsState().value
             val issuedCodeState = issuedInvitationCode.collectAsState().value
+            val blacklistState = blacklist.collectAsState().value
             FuckIpv6Theme {
                 contracts.fold(
                     onSuccess = {
@@ -357,6 +377,10 @@ class MainActivity : ComponentActivity() {
                             localExit = ready?.peers?.let(ExitSurface::parseLocalExit),
                             exitSelections = ready?.peers?.let(ExitSurface::parseSelections),
                             topology = ready?.peers?.let(TopologySurface::parse),
+                            blacklist = blacklistState,
+                            onRefreshBlacklist = { refreshBlacklist(selectedNetwork.value) },
+                            onBanClient = ::banClient,
+                            onUnbanClient = ::unbanClient,
                             availableNetworks = availableNetworks,
                             selectedNetworkName = selectedNetworkName,
                             onSelectNetwork = { name -> selectedNetwork.value = name },
@@ -522,6 +546,37 @@ class MainActivity : ComponentActivity() {
         )
         // Keep the compiler honest about the unused config in this path.
         check(config.isValid)
+    }
+
+    private fun refreshBlacklist(networkName: String? = selectedNetwork.value) {
+        val bridge = blacklistBridge ?: return
+        val command = BlacklistSurface.statusCommand(networkName.orEmpty()) ?: return
+        bridge.submit(
+            bridgeScope,
+            CommandJson.envelope(
+                command = command,
+                requestId = nextRequestId(),
+                idempotencyKey = "blacklist-status-$networkName-${UUID.randomUUID()}",
+            ),
+        )
+    }
+
+    private fun banClient(clientId: String) {
+        submitBlacklistMutation(BlacklistSurface.banCommand(selectedNetwork.value.orEmpty(), clientId))
+    }
+
+    private fun unbanClient(clientId: String) {
+        submitBlacklistMutation(BlacklistSurface.unbanCommand(selectedNetwork.value.orEmpty(), clientId))
+    }
+
+    private fun submitBlacklistMutation(command: org.json.JSONObject?) {
+        val bridge = blacklistBridge ?: return
+        val body = CommandJson.envelope(
+            command = command ?: return,
+            requestId = nextRequestId(),
+            idempotencyKey = "blacklist-${UUID.randomUUID()}",
+        )
+        bridge.submit(bridgeScope, body)
     }
 
     /**

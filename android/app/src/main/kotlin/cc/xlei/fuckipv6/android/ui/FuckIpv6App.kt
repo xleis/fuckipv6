@@ -75,6 +75,10 @@ fun FuckIpv6App(
     localExit: cc.xlei.fuckipv6.android.bridge.LocalExitView? = null,
     exitSelections: List<cc.xlei.fuckipv6.android.bridge.ExitSelectionView>? = null,
     topology: cc.xlei.fuckipv6.android.bridge.TopologyView? = null,
+    blacklist: cc.xlei.fuckipv6.android.bridge.BlacklistView? = null,
+    onRefreshBlacklist: (() -> Unit)? = null,
+    onBanClient: ((String) -> Unit)? = null,
+    onUnbanClient: ((String) -> Unit)? = null,
     members: cc.xlei.fuckipv6.android.bridge.MemberDirectoryView? = null,
     onRefreshMembers: (() -> Unit)? = null,
     onMemberLifecycleAction: ((String, cc.xlei.fuckipv6.android.bridge.MemberView) -> Unit)? = null,
@@ -191,6 +195,10 @@ fun FuckIpv6App(
                 localExit = localExit,
                 exitSelections = exitSelections,
                 topology = topology,
+                blacklist = blacklist,
+                onRefreshBlacklist = onRefreshBlacklist,
+                onBanClient = onBanClient,
+                onUnbanClient = onUnbanClient,
                 members = members,
                 onRefreshMembers = onRefreshMembers,
                 onMemberLifecycleAction = onMemberLifecycleAction,
@@ -260,6 +268,10 @@ fun PageContent(
     localExit: cc.xlei.fuckipv6.android.bridge.LocalExitView? = null,
     exitSelections: List<cc.xlei.fuckipv6.android.bridge.ExitSelectionView>? = null,
     topology: cc.xlei.fuckipv6.android.bridge.TopologyView? = null,
+    blacklist: cc.xlei.fuckipv6.android.bridge.BlacklistView? = null,
+    onRefreshBlacklist: (() -> Unit)? = null,
+    onBanClient: ((String) -> Unit)? = null,
+    onUnbanClient: ((String) -> Unit)? = null,
     members: cc.xlei.fuckipv6.android.bridge.MemberDirectoryView? = null,
     onRefreshMembers: (() -> Unit)? = null,
     onMemberLifecycleAction: ((String, cc.xlei.fuckipv6.android.bridge.MemberView) -> Unit)? = null,
@@ -369,6 +381,20 @@ fun PageContent(
                     locale = locale,
                     contracts = contracts,
                 )
+            pageId == "networks" && onRefreshBlacklist != null ->
+                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    networks?.let {
+                        NetworksContent(contracts = contracts, locale = locale, networks = it)
+                    }
+                    BlacklistContent(
+                        contracts = contracts,
+                        locale = locale,
+                        blacklist = blacklist,
+                        onRefresh = onRefreshBlacklist,
+                        onBan = onBanClient,
+                        onUnban = onUnbanClient,
+                    )
+                }
             pageId == "topology" && topology != null ->
                 TopologyContent(contracts = contracts, locale = locale, topology = topology)
             pageId == "exit_node" && (localExit != null || exitSelections != null) ->

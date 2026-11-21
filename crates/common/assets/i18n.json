@@ -3372,7 +3372,11 @@
       "invitation.error.unobserved": "尚未读取邀请列表。",
       "peers.unobserved.detail": "尚未从节点快照读取到该网络的节点列表。",
       "identity.hidden": "已按隐私策略隐藏",
-      "logs.unavailable.detail": "本快照没有携带日志行；日志只对节点所有者可见，也可能只是尚未产生。"
+      "logs.unavailable.detail": "本快照没有携带日志行；日志只对节点所有者可见，也可能只是尚未产生。",
+      "blacklist.section.title": "客户端黑名单",
+      "blacklist.action.ban": "封禁",
+      "blacklist.action.unban": "解除",
+      "blacklist.input.label": "客户端标识"
     },
     "en": {
       "nav.overview": "Overview",
@@ -6744,7 +6748,11 @@
       "invitation.error.unobserved": "The invitation list has not been read yet.",
       "peers.unobserved.detail": "The node snapshot has not reported peers for this network yet.",
       "identity.hidden": "Hidden by the privacy policy",
-      "logs.unavailable.detail": "This snapshot carried no log lines: logs are visible to the node owner only, and none may exist yet."
+      "logs.unavailable.detail": "This snapshot carried no log lines: logs are visible to the node owner only, and none may exist yet.",
+      "blacklist.section.title": "Client blacklist",
+      "blacklist.action.ban": "Ban",
+      "blacklist.action.unban": "Unban",
+      "blacklist.input.label": "Client id"
     }
   }
 }

@@ -280,9 +280,17 @@ class FileTransferClient(
                         connection.setChunkedStreamingMode(64 * 1024)
                     }
                 }
-                FilterOutputStream(connection.outputStream).use { output ->
-                    writeBody(output)
-                    output.flush()
+                // A caller-provided source that disagrees with the declared length
+                // is a local contract violation, not a dead network: reporting it
+                // as `Unreachable` would send the operator looking for a network
+                // fault that does not exist.
+                try {
+                    FilterOutputStream(connection.outputStream).use { output ->
+                        writeBody(output)
+                        output.flush()
+                    }
+                } catch (_: IOException) {
+                    return TransferOutcome.Failed(BridgeFailure.Misconfigured)
                 }
             }
             val status = connection.responseCode

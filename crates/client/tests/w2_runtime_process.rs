@@ -98,7 +98,7 @@ fn headless_test_command(directory: &Path) -> Command {
         .current_dir(directory)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(child_stderr_stdio(directory));
     command
 }
 
@@ -301,16 +301,23 @@ async fn wait_for_webui(port: u16, guard: &mut ProcessGuard) -> Result<()> {
 
 /// A failed handshake is only diagnosable with the child's own words, so the
 /// guard is drained once the process is known to be dead.
+/// A child spawned here can outlive the direct process (control detaches a node),
+/// so its stderr must land in a file: reading a shared pipe would wait for an EOF
+/// that the grandchild is still holding and hang the whole test binary.
+fn child_stderr_stdio(directory: &Path) -> Stdio {
+    match std::fs::File::create(directory.join("node-stderr.log")) {
+        Ok(file) => Stdio::from(file),
+        Err(_) => Stdio::null(),
+    }
+}
+
 fn drain_stderr(guard: &mut ProcessGuard) -> String {
-    guard
-        .child
-        .stderr
-        .take()
-        .map(|mut stream| std::io::read_to_string(&mut stream))
-        .transpose()
-        .ok()
-        .flatten()
-        .unwrap_or_default()
+    let directory = guard
+        .runtime_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| guard.runtime_dir.clone());
+    std::fs::read_to_string(directory.join("node-stderr.log")).unwrap_or_default()
 }
 
 async fn wait_for_process_exit(pid: u32) -> Result<()> {
@@ -379,13 +386,7 @@ async fn control_supervises_one_node_and_ui_disconnect_leaves_it_running() -> Re
             .map(|mut stream| std::io::read_to_string(&mut stream))
             .transpose()?
             .unwrap_or_default();
-        let stderr = child
-            .child
-            .stderr
-            .take()
-            .map(|mut stream| std::io::read_to_string(&mut stream))
-            .transpose()?
-            .unwrap_or_default();
+        let stderr = drain_stderr(&mut child);
         format!("stdout:\n{stdout}\nstderr:\n{stderr}")
     };
     assert!(status.success(), "control exited with {status}: {output}");
@@ -760,13 +761,7 @@ async fn desktop_hosts_refuse_webui_before_starting_the_node() -> Result<()> {
         "desktop host unexpectedly started a WebUI process"
     );
 
-    let stderr = ui
-        .child
-        .stderr
-        .take()
-        .map(|mut stream| std::io::read_to_string(&mut stream))
-        .transpose()?
-        .unwrap_or_default();
+    let stderr = drain_stderr(&mut ui);
     assert!(
         stderr.contains("desktop session") || stderr.contains("桌面会话"),
         "desktop WebUI rejection did not explain the policy: {stderr}"

@@ -4676,6 +4676,21 @@ Android 单测共 146 项通过。W16-01 仍缺真机验收，保持 `[ ]`。
 
 ### W18-02 Rust 质量门禁 `[ ]`
 
+**补充（2026-11-21，第二次本地 release-gate linux 实跑）**：修掉 musl 交叉编译与 `UiSurfaceKind::Gpui` 死代码告警后重跑，
+`python3 scripts/release-gate.py run --platform linux --toolchain stable --allow-dirty --benchmark none` 的结果只剩一项红：
+
+| 检查 | 结果 |
+|---|---|
+| `format` / `docs` / `helper-tests` / `single-binary` | passed |
+| `check` / `test` / `release-build` | passed |
+| `lifecycle-cleanup`（含 route/dns/tun/exit-rules） | passed |
+| `cross-check-x86_64-unknown-linux-musl` / `-pc-windows-gnu` | passed |
+| `stable-source` | passed |
+| `clippy` | failed —— **仅** `crates/client/src/gpui/view.rs` 里 3 处 `needless_borrows_for_generic_args`（`.map(&display_name)`），该文件是并发会话未提交的 WIP |
+
+结论：Linux 门禁的可执行面已全部转绿，唯一红项属于另一会话尚未提交的改动，不由本轮代改（避免把别人未完成的工作混进提交）。
+一旦该 WIP 提交（或由该会话修掉 3 处多余借用），本地 Linux 门禁应可整绿。
+
 **补充（2026-11-21，本地 release-gate linux 实跑）**：以 `python3 scripts/release-gate.py run --platform linux --toolchain stable --allow-dirty --benchmark none` 在本机跑完整 Linux 门禁，结果 `failed`，逐项归因：
 
 | 检查 | 结果 | 归因 |

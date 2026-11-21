@@ -1,6 +1,21 @@
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
+import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
+
+// The release gate asks the build artifact to be traceable to a commit. `git` is
+// present in CI and in a checkout, but a source tarball may not carry it, so the
+// value degrades to an explicit marker instead of failing the build.
+function buildCommit(): string {
+  try {
+    return execFileSync("git", ["rev-parse", "--short=12", "HEAD"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return "unknown";
+  }
+}
 
 const cleanRemoveScrollBarCss = {
   name: "clean-remove-scroll-bar-css",
@@ -19,6 +34,9 @@ const cleanRemoveScrollBarCss = {
 export default defineConfig({
   plugins: [react(), cleanRemoveScrollBarCss],
   base: "/",
+  define: {
+    __FUCKIPV6_BUILD_COMMIT__: JSON.stringify(buildCommit()),
+  },
   build: {
     outDir: resolve(__dirname, "../crates/client/src/webui/dist"),
     emptyOutDir: true,

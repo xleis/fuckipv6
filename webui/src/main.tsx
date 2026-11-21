@@ -12,6 +12,10 @@ const queryClient = new QueryClient({
   },
 });
 
+// Expose the commit the bundle was built from: the release gate requires the
+// artifact to be traceable, and the embedded single binary ships this bundle.
+document.documentElement.dataset.buildCommit = __FUCKIPV6_BUILD_COMMIT__;
+
 const root = document.getElementById("root");
 if (!root) throw new Error("WebUI root element is missing");
 

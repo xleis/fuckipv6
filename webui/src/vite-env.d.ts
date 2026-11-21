@@ -21,6 +21,9 @@ declare global {
   interface Window {
     FuckIPV6I18n?: I18nRuntime;
   }
+
+  /// Commit the bundle was built from, injected by vite.config.ts.
+  const __FUCKIPV6_BUILD_COMMIT__: string;
 }
 
 export {};

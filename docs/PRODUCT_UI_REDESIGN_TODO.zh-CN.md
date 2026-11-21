@@ -4960,6 +4960,15 @@ Android 前台服务未实现）；第 5 条的 TUN 残留问题仍有 2026-11-1
 
 **验收**：平台支持表每项都有证据链接或明确“不支持”，不允许空白承诺。
 
+**证据（2026-11-21，CI 平台门禁首次可跑与 Linux 本机复验）**：本条的八项都还没有一份可直接引用的平台报告，但阻塞性质已经变了——此前这些门禁连构建都进不去，现在它们只是在时限内跑不完：
+
+- **门禁可跑性**：Verify 的 `contracts`、`governance`、`api-security`、`gpui-smoke`、`supply-chain`、`docs`、`android` 七个 job 在同一提交上为 success（run `44857799539`）。这说明 GPUI/Android 的平台依赖链（fontconfig、freetype、xcb、xkbcommon、xdotool、JDK 21 + SDK 36）已经齐全，平台报告缺的是运行时长而不是环境；
+- **Linux（第 1 条）**：本机以 `python3 scripts/release-gate.py run --platform linux --toolchain stable --allow-dirty --benchmark none` 复跑，`format`/`docs`/`helper-tests`/`single-binary`/`check`/`test`/`release-build`/`lifecycle-cleanup`（含 route、dns、tun、exit-rules）/两条交叉检查/`stable-source`/`benchmark` 全部 passed；随后的 `cargo clippy --workspace --all-targets --all-features -- -D warnings` 也为 exit 0。CI 的 Linux job 由于 60 分钟时限被 cancelled，时限已提到 150 分钟，待复跑转绿后第 1 条才可勾。注意这只是本机 Linux，不是"实机报告"意义上的目标机型矩阵；
+- **macOS / Windows（第 2、3 条）**：两者此前都在 120 分钟时限被 cancelled，现为 240 分钟。这两个平台此前从未产出过一份报告，因此第 2、3 条没有任何可引用证据，不勾；
+- **Android（第 4 条）**：CI 的 Android job 已通过（JDK 21、共享 i18n 字面量检查、单测、lint、debug 构建），但 W16-08 的真机 E2E 与 W16-02 的前台 VpnService 仍未执行，第 4 条不勾；
+- **可访问性（第 7 条）**：WebUI 侧 `scripts/test_webui_accessibility.mjs` passed（W18-03 已记），GPUI/Compose 侧没有等价自动证据，不勾；
+- **未支持平台（第 8 条）**：W17-01～W17-08 全为未开始，平台支持表尚不存在，不勾。
+
 ### W18-10 可复现构建与发布产物 `[ ]`
 
 - [ ] 干净工作区从锁定依赖构建；

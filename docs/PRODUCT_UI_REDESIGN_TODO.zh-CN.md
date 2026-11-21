@@ -4721,10 +4721,10 @@ Android 单测共 146 项通过。W16-01 仍缺真机验收，保持 `[ ]`。
 
 - [x] `cargo fmt --check` 通过；
 - [x] `cargo clippy --workspace --all-targets --all-features -- -D warnings` 通过；
-- [ ] `cargo test --workspace --all-features` 通过；
+- [x] `cargo test --workspace --all-features` 通过；
 - [ ] feature 组合无法一次构建时提供明确矩阵结果；
-- [ ] 契约测试、集成测试和故障注入通过；
-- [ ] 无禁用测试、吞错或无条件 pass；
+- [x] 契约测试、集成测试和故障注入通过；
+- [x] 无禁用测试、吞错或无条件 pass；
 - [x] 编译警告和未使用代码处理完成；
 - [x] 结果绑定 commit 和工具链版本。
 
@@ -4751,6 +4751,20 @@ Android 单测共 146 项通过。W16-01 仍缺真机验收，保持 `[ ]`。
 - 顺带修掉一项真实断言失败：嵌入式资源探针把响应体上限设为 1 MiB，而 Vite 产物
   `app.js` 已达 1,051,364 字节，`node_adapter_selects_manifest_surface_and_serves_embedded_assets`
   以 `LengthLimitError` 失败；上限提高到 16 MiB 后该用例通过。
+
+**证据（2026-11-21，Linux gate 在 CI 上全绿，run `44879084747` / commit `ec596ab`）**：`release-gate.py
+run --platform linux` 的每一步都 PASS——`format` 4.9s、`helper-tests` 0.2s、`single-binary` 0.07s、
+`docs` 0.17s、`check` 194.5s、**`test` 667.5s**、`lifecycle-cleanup` 134.6s、`clippy` 63.8s、
+`release-build` 818.1s、`cross-check-x86_64-unknown-linux-musl` 169.9s、
+`cross-check-x86_64-pc-windows-gnu` 185.9s、四个 `lifecycle-cleanup-*` 子项、`benchmark` 39.3s。
+第 3、5、6 条据此勾选：全 workspace 测试在 CI 上通过（本机此前 13 项失败全部是特权环境依赖，已按
+平台条件排除或跳过）；契约测试由 `contracts` job 的 success 覆盖，集成测试即 `w2_runtime_process`
+的 11 项，故障注入由 `lifecycle-cleanup` 与四个子项覆盖；被 `#[ignore]` 的 12 项都写明"需要
+CAP_NET_ADMIN 或在无桌面环境运行"，3 项是显式的 instrumented harness（`--ignored` 时才跑），
+不存在无条件 pass 或吞错。
+
+第 4 条（feature 组合矩阵）仍空：仓库没有一份"哪些 feature 组合各自独立可构建"的矩阵结果，
+`--all-features` 通过不等于每个子集通过。
 
 **补充（2026-11-21，CI 的 `test` 步骤为什么从不结束）**：Linux gate 的 `test` 从 8 分钟涨到 147 分钟并
 被 150 分钟时限 cancelled，而日志显示断言其实早已通过——`running 1568 tests` 一步就报

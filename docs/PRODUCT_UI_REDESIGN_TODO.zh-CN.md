@@ -4686,6 +4686,11 @@ Android 单测共 146 项通过。W16-01 仍缺真机验收，保持 `[ ]`。
   `visible_actions_exactly_cover_canonical_action_commands` 保证可见动作与权威命令集合一一对应，
   因此不存在“声明了动作却没有命令”或“有命令却无入口”的静默路径。据此勾选第 3 条：入口存在但
   不可点击、且原因可解释，符合本条的验收语义（不允许看起来可用）。
+- **第 8 条的起点（2026-11-21）**：新增测试 `writes_the_action_evidence_table`，把 manifest 的每个
+  页面动作导出为 `target/w18-ui-audit/actions.tsv`——列为 page、action、command、permission、
+  audit policy、backend status、availability，当前 **77 行**（77 个可见动作）。它只钉住"表非空且
+  覆盖全部页面动作"，防止 manifest 改动悄悄缩小审计面。第 8 条仍不勾：这张表还缺"证据"列
+  （每个动作对应的测试名或实测记录），而那需要逐个动作挂上证据，不是一次导出能完成的。
 - **第 7 条仍未达成**：`crates/coordinator/src/webui/mod.rs` 仍是 3,704 行的独立控制台，
   自带 `/`、`/api/status`、`/api/peers`、`/api/logs`、`/api/blacklist*` 以及
   `/assets/webui.css`、`/assets/ui-navigation.js`、`/assets/ui-components.js`，与 W0-03 决定的

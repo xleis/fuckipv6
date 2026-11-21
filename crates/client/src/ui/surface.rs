@@ -17,7 +17,17 @@ const SURFACE_LOCK_FILE: &str = "ui-surface.lock";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UiSurfaceKind {
-    #[cfg_attr(not(feature = "gpui-shell"), allow(dead_code))]
+    /// Only a build that actually contains the native GPUI shell can construct
+    /// this variant; the module is excluded on musl and on non-desktop targets,
+    /// so the variant must be excluded with it instead of merely silenced.
+    #[cfg(all(
+        feature = "gpui-shell",
+        any(
+            all(target_os = "linux", not(target_env = "musl")),
+            windows,
+            target_os = "macos"
+        )
+    ))]
     Gpui,
     WebUi,
 }
@@ -25,6 +35,14 @@ pub(crate) enum UiSurfaceKind {
 impl UiSurfaceKind {
     fn label(self) -> &'static str {
         match self {
+            #[cfg(all(
+                feature = "gpui-shell",
+                any(
+                    all(target_os = "linux", not(target_env = "musl")),
+                    windows,
+                    target_os = "macos"
+                )
+            ))]
             Self::Gpui => "GPUI",
             Self::WebUi => "WebUI",
         }
@@ -127,15 +145,42 @@ mod tests {
         let directory = temporary_directory("exclusive");
         let webui = acquire_in(&directory, UiSurfaceKind::WebUi).expect("first surface lease");
 
-        let error = acquire_in(&directory, UiSurfaceKind::Gpui)
-            .expect_err("second surface must fail closed");
-        assert!(error.to_string().contains("WebUI"));
-        assert!(error.to_string().contains("只能启动一个"));
+        // Only a build that contains the native GPUI shell may claim it; on other
+        // builds the variant does not exist and the second claimant is WebUI.
+        #[cfg(all(
+            feature = "gpui-shell",
+            any(
+                all(target_os = "linux", not(target_env = "musl")),
+                windows,
+                target_os = "macos"
+            )
+        ))]
+        {
+            let error = acquire_in(&directory, UiSurfaceKind::Gpui)
+                .expect_err("second surface must fail closed");
+            assert!(error.to_string().contains("WebUI"));
+            assert!(error.to_string().contains("只能启动一个"));
 
-        drop(webui);
-        let gpui = acquire_in(&directory, UiSurfaceKind::Gpui)
-            .expect("lease must be reusable after the first surface exits");
-        drop(gpui);
+            drop(webui);
+            let gpui = acquire_in(&directory, UiSurfaceKind::Gpui)
+                .expect("lease must be reusable after the first surface exits");
+            drop(gpui);
+        }
+
+        #[cfg(not(all(
+            feature = "gpui-shell",
+            any(
+                all(target_os = "linux", not(target_env = "musl")),
+                windows,
+                target_os = "macos"
+            )
+        )))]
+        {
+            let error = acquire_in(&directory, UiSurfaceKind::WebUi)
+                .expect_err("second WebUI surface must fail closed");
+            assert!(error.to_string().contains("WebUI"));
+            drop(webui);
+        }
 
         let _ = std::fs::remove_dir_all(directory);
     }

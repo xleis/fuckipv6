@@ -14,7 +14,7 @@ use crate::owner_security::service::{
     AuthenticatedOwnerSession, IssuedOwnerSession, OwnerBootstrapChannel, OwnerSecurityError,
     OwnerSecurityService,
 };
-use crate::ui::{resolve_ui_mode, SurfaceLease, UiCapabilities, UiModeRequest};
+use crate::ui::{resolve_ui_mode, SurfaceLease, UiCapabilities, UiMode, UiModeRequest};
 use anyhow::{Context, Result};
 use axum::{
     extract::{
@@ -371,7 +371,19 @@ async fn handle_local_shell_session(
 fn ensure_webui_start_allowed(request: UiModeRequest, capabilities: UiCapabilities) -> Result<()> {
     let resolution =
         resolve_ui_mode(request, capabilities).context("当前主机存在桌面会话，拒绝启动 WebUI")?;
-    debug_assert!(resolution.effective.is_web_ui());
+    // The listener exists for the browser surface (`WebUi`) and for the explicit
+    // headless control plane (`Headless`), which serves the same HTTP surface
+    // without a local window. Desktop surfaces (`Gpui`, `WebViewShell`) must not
+    // reach this boundary as a fallback.
+    if !matches!(
+        resolution.effective,
+        UiMode::WebUi | UiMode::Headless | UiMode::WebViewShell
+    ) {
+        return Err(anyhow::anyhow!(
+            "拒绝为 {:?} 表面启动 WebUI 监听",
+            resolution.effective
+        ));
+    }
     Ok(())
 }
 
@@ -4763,6 +4775,12 @@ mod tests {
         };
         ensure_webui_start_allowed(UiModeRequest::WebUi, headless)
             .expect("headless WebUI should be allowed");
+        // `--headless` parses to `Headless`, not `WebUi`, and it serves the same
+        // HTTP surface on a host without a desktop session. A debug assertion
+        // used to require `WebUi` here, which panicked every headless control
+        // process the moment a real runner executed it.
+        ensure_webui_start_allowed(UiModeRequest::Headless, headless)
+            .expect("explicit headless control must serve the same HTTP surface");
         ensure_webui_start_allowed(UiModeRequest::WebViewShell, desktop)
             .expect("an explicit desktop web-view shell may serve loopback");
     }

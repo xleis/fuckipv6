@@ -4757,7 +4757,9 @@ Android 单测共 146 项通过。W16-01 仍缺真机验收，保持 `[ ]`。
 `1565 passed / 0 failed`，随后 `w2_runtime_process` 的 11 个用例再也不出结果。根因是本轮自己引入的
 诊断代码：握手失败时先 kill 直接子进程、再把 piped stderr 读到 EOF，而 control 会**故意 detach 一个
 node 进程**，那个孙进程仍持有管道写端，EOF 永不到来。现在 stderr 在 spawn 时重定向到
-`node-stderr.log`，诊断改为读文件（不会阻塞），本机 headless 复跑 11/11 通过（3.33 s）。
+`node-stderr.log`，诊断改为读文件（不会阻塞）。注意本机"11/11 passed"里有 5 项是打印「跳过」的
+（详见 W18-08 的更正），真正的验证来自 CI：修好阻塞读后 Linux gate 的 `test` 从挂死变成
+`FAIL`（342 s），stderr 直接给出 `panicked at webui/mod.rs: resolution.effective.is_web_ui()`。
 教训记录在此：测试基建里的阻塞读比断言失败更难发现，因为它表现为"卡住"而不是"红"。
 
 ### W18-03 前端质量门禁 `[ ]`
@@ -4978,14 +4980,26 @@ Android 前台服务未实现）；第 5 条的 TUN 残留问题仍有 2026-11-1
 「所有失败」这个全称还没有一份汇总证据；第 7 条与第 5 条同源。第 8 条需要把 W12 干扰矩阵、W14
 脑裂/断电矩阵、W2 生命周期用例合并成一份清单，目前散落在三个工作包里。
 
-**补充（2026-11-21，无桌面环境实跑）**：在有桌面会话的主机上，这些用例默认按产品策略跳过（
-`skip_webui_lifetime_test_on_desktop`），所以"本地通过"此前可能是跳过。本轮以
+**补充（2026-11-21，先误判后更正）**：在有桌面会话的主机上这些用例按策略跳过
+（`skip_webui_lifetime_test_on_desktop`）。本轮先用
 `env -u DISPLAY -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE -u XDG_CURRENT_DESKTOP -u DESKTOP_SESSION`
-实跑 `cargo test -p fuckipv6-client --test w2_runtime_process`，**11 项全过**（3.92 s），包括
-`closing_headless_webui_does_not_stop_the_node`、`new_headless_ui_restarts_crashed_control_and_adopts_live_node`、
-`stopping_data_plane_keeps_control_and_webui_available` 与 `service_process_owns_control_and_stops_node_on_termination`，
-即前三条的证据在无桌面环境下真实成立而非被跳过。同批用例在 Linux gate 的全量并行运行中曾有 4 项以
-「WebUI 未在期限内监听」失败，就绪轮询预算按四核满载余量放宽十倍后仍空闲即返回，语义不变。
+跑出 11/11 passed（3.92 s）并据此认为"无桌面环境下真实成立"——**该结论是错的**。加上 `-- --nocapture`
+后可以看到其中 5 项（`service_process_owns_control_and_stops_node_on_termination`、
+`headless_command_entrypoint_reexports_the_same_control`、
+`new_headless_ui_restarts_crashed_control_and_adopts_live_node`、
+`stopping_data_plane_keeps_control_and_webui_available`、
+`closing_headless_webui_does_not_stop_the_node`）实际打印的是
+「跳过 …：当前主机存在桌面会话」：`DisplayEnvironment::detect()` 判的是宿主是否真有桌面（socket、
+runtime dir），不是环境变量，因此 unset 变量并不能伪造无头主机。断言"11 项全过"是把跳过当成了通过，
+本条记录予以更正。
+
+真正在无桌面环境里跑的是 CI：Linux gate 上这 4 项以 `exit status: 101` 失败，排空子进程 stderr 后
+看到真实原因——`crates/client/src/webui/mod.rs` 的 `ensure_webui_start_allowed` 用
+`debug_assert!(resolution.effective.is_web_ui())` 要求解析结果为 `WebUi`，而 `--headless` 解析成
+`UiModeRequest::Headless`、在无桌面主机上解析为 `UiMode::Headless`，于是每个无头 control 进程都在
+该断言处 panic。现在监听边界接受 `WebUi`、`Headless` 与 `WebViewShell`，只拒绝 `Gpui`，并由既有
+`production_webui_start_is_rejected_on_desktop_hosts` 用例补上 headless 分支。前三条的证据因此
+**尚未**在本机取得，只有 CI 的 Linux gate 转绿才算。
 
 ### W18-09 平台发布门禁 `[ ]`
 

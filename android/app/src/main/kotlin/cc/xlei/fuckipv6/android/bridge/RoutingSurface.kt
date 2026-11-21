@@ -24,6 +24,32 @@ data class RoutingSummaryView(
 )
 
 object RoutingSurface {
+    val MODES = setOf("mesh_only", "bypass_mainland", "global_proxy")
+
+    /**
+     * Encodes a hot routing update. Unknown modes, blank network names and blank
+     * exit-node identifiers are refused locally; the runtime rejects them anyway
+     * but a local refusal keeps an obviously invalid form from being submitted.
+     */
+    fun updateCommand(
+        networkName: String,
+        mode: String,
+        exitNode: String? = null,
+        isExitNode: Boolean = false,
+    ): JSONObject? {
+        val network = networkName.trim()
+        if (network.isEmpty() || mode !in MODES) return null
+        val exit = exitNode?.trim()?.takeIf { it.isNotEmpty() }
+        val payload = JSONObject()
+            .put("network_name", network)
+            .put("mode", mode)
+            .put("is_exit_node", isExitNode)
+        exit?.let { payload.put("exit_node", it) }
+        return JSONObject()
+            .put("command", "update_routing")
+            .put("payload", payload)
+    }
+
     fun parse(snapshot: JSONObject): List<RoutingSummaryView>? {
         val raw = snapshot.opt("routing_summaries") ?: return null
         val array = when (raw) {

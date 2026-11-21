@@ -2,11 +2,21 @@ package cc.xlei.fuckipv6.android.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -30,7 +40,13 @@ fun RoutingContent(
     contracts: SharedContracts,
     locale: Locale,
     summaries: List<RoutingSummaryView>?,
+    networkName: String? = null,
+    onUpdateRouting: ((mode: String, exitNode: String?, isExitNode: Boolean) -> Unit)? = null,
 ) {
+    var selectedMode by remember(networkName) { mutableStateOf("mesh_only") }
+    var exitNode by remember(networkName) { mutableStateOf("") }
+    var isExitNode by remember(networkName) { mutableStateOf(false) }
+    var confirm by remember { mutableStateOf(false) }
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -83,6 +99,84 @@ fun RoutingContent(
                     }
                 }
             }
+            if (onUpdateRouting != null && !networkName.isNullOrBlank()) {
+                Text(
+                    text = contracts.i18n.translate(locale, "action.update_routing"),
+                    style = MaterialTheme.typography.labelLarge,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    for (mode in cc.xlei.fuckipv6.android.bridge.RoutingSurface.MODES) {
+                        FilterChip(
+                            modifier = Modifier.testTag("routing-mode-$mode"),
+                            selected = mode == selectedMode,
+                            onClick = { selectedMode = mode },
+                            label = {
+                                Text(contracts.i18n.translate(locale, "choice.routing.$mode"))
+                            },
+                        )
+                    }
+                }
+                OutlinedTextField(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("routing-exit-input"),
+                    value = exitNode,
+                    onValueChange = { exitNode = it },
+                    label = { Text(contracts.i18n.translate(locale, "nav.exit_node")) },
+                    singleLine = true,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = contracts.i18n.translate(locale, "action.set_local_exit_capability"),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Switch(
+                        modifier = Modifier.testTag("routing-is-exit"),
+                        checked = isExitNode,
+                        onCheckedChange = { isExitNode = it },
+                    )
+                }
+                TextButton(
+                    modifier = Modifier.testTag("routing-submit"),
+                    onClick = { confirm = true },
+                ) {
+                    Text(contracts.i18n.translate(locale, "action.update_routing"))
+                }
+            }
         }
+    }
+    if (confirm) {
+        AlertDialog(
+            onDismissRequest = { confirm = false },
+            title = {
+                Text(contracts.i18n.translate(locale, "confirm.update_routing.title"))
+            },
+            text = {
+                Text(
+                    contracts.i18n.translate(locale, "confirm.update_routing.consequence"),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    modifier = Modifier.testTag("routing-confirm"),
+                    onClick = {
+                        confirm = false
+                        onUpdateRouting?.invoke(
+                            selectedMode,
+                            exitNode.trim().ifEmpty { null },
+                            isExitNode,
+                        )
+                    },
+                ) {
+                    Text(contracts.i18n.translate(locale, "action.update_routing"))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirm = false }) {
+                    Text(contracts.i18n.translate(locale, "common.cancel"))
+                }
+            },
+        )
     }
 }

@@ -112,6 +112,7 @@ class MainActivity : ComponentActivity() {
     private val issuedInvitationCode = MutableStateFlow<String?>(null)
     private val blacklist = MutableStateFlow<BlacklistView?>(null)
     private var blacklistBridge: NodeCommandBridge? = null
+    private var routingBridge: NodeCommandBridge? = null
     private var memberNetworkId: String? = null
     private val selectedNetwork = MutableStateFlow<String?>(null)
 
@@ -191,6 +192,22 @@ class MainActivity : ComponentActivity() {
                             outcome.outcomeStatus == "blacklist"
                         ) {
                             BlacklistSurface.parse(outcome.data)?.let { blacklist.value = it }
+                        }
+                    }
+                }
+            }
+        routingBridge = apiConfig
+            ?.takeIf { it.isValid }
+            ?.let { NodeCommandBridge(NodeCommandClient(it)) }
+            ?.also { bridge ->
+                bridgeScope.launch {
+                    bridge.lastOutcome().collect { outcome ->
+                        if (outcome is CommandOutcome.Succeeded &&
+                            outcome.outcomeStatus == "completed"
+                        ) {
+                            // Routing answers with a message, not a projection:
+                            // re-read the snapshot instead of parsing prose.
+                            node?.pollOnce()
                         }
                     }
                 }
@@ -379,6 +396,7 @@ class MainActivity : ComponentActivity() {
                             topology = ready?.peers?.let(TopologySurface::parse),
                             blacklist = blacklistState,
                             onRefreshBlacklist = { refreshBlacklist(selectedNetwork.value) },
+                            onUpdateRouting = ::updateRouting,
                             onBanClient = ::banClient,
                             onUnbanClient = ::unbanClient,
                             availableNetworks = availableNetworks,
@@ -546,6 +564,26 @@ class MainActivity : ComponentActivity() {
         )
         // Keep the compiler honest about the unused config in this path.
         check(config.isValid)
+    }
+
+    /**
+     * Hot-applies a routing update. The form is only a request: once the node
+     * answers `completed`, the snapshot is re-read so the applied summary the
+     * page shows is always the node's, never the form's intent.
+     */
+    private fun updateRouting(mode: String, exitNode: String?, isExitNode: Boolean) {
+        val bridge = routingBridge ?: return
+        val networkName = selectedNetwork.value ?: return
+        val command = RoutingSurface.updateCommand(networkName, mode, exitNode, isExitNode)
+            ?: return
+        bridge.submit(
+            bridgeScope,
+            CommandJson.envelope(
+                command = command,
+                requestId = nextRequestId(),
+                idempotencyKey = "routing-update-$networkName-${UUID.randomUUID()}",
+            ),
+        )
     }
 
     private fun refreshBlacklist(networkName: String? = selectedNetwork.value) {

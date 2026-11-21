@@ -2,6 +2,7 @@ package cc.xlei.fuckipv6.android.bridge
 
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -56,5 +57,30 @@ class RoutingSurfaceTest {
         assertTrue(
             RoutingSurface.parse(JSONObject("""{"routing_summaries":[{"network_name":""},"x"]}"""))!!.isEmpty(),
         )
+    }
+
+    @Test
+    fun updateCommandCarriesTheModeAndOptionalExit() {
+        val command = RoutingSurface.updateCommand("家庭网络", "bypass_mainland", " node-exit ", false)!!
+        assertEquals("update_routing", command.getString("command"))
+        val payload = command.getJSONObject("payload")
+        assertEquals("家庭网络", payload.getString("network_name"))
+        assertEquals("bypass_mainland", payload.getString("mode"))
+        assertEquals("node-exit", payload.getString("exit_node"))
+        assertFalse(payload.getBoolean("is_exit_node"))
+
+        val noExit = RoutingSurface.updateCommand("家庭网络", "mesh_only")!!
+        assertFalse(noExit.getJSONObject("payload").has("exit_node"))
+    }
+
+    @Test
+    fun unknownModesAndBlankIdentifiersNeverReachTheWire() {
+        assertNull(RoutingSurface.updateCommand("家庭网络", "smart"))
+        assertNull(RoutingSurface.updateCommand(" ", "mesh_only"))
+        val blankExit = RoutingSurface.updateCommand("家庭网络", "mesh_only", exitNode = "   ")!!
+        assertFalse(blankExit.getJSONObject("payload").has("exit_node"))
+        for (mode in RoutingSurface.MODES) {
+            assertTrue(RoutingSurface.updateCommand("n", mode) != null)
+        }
     }
 }

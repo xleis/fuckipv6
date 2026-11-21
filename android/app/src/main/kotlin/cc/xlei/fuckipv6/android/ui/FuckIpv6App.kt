@@ -76,6 +76,7 @@ fun FuckIpv6App(
     exitSelections: List<cc.xlei.fuckipv6.android.bridge.ExitSelectionView>? = null,
     topology: cc.xlei.fuckipv6.android.bridge.TopologyView? = null,
     blacklist: cc.xlei.fuckipv6.android.bridge.BlacklistView? = null,
+    onUpdateRouting: ((mode: String, exitNode: String?, isExitNode: Boolean) -> Unit)? = null,
     onRefreshBlacklist: (() -> Unit)? = null,
     onBanClient: ((String) -> Unit)? = null,
     onUnbanClient: ((String) -> Unit)? = null,
@@ -196,6 +197,7 @@ fun FuckIpv6App(
                 exitSelections = exitSelections,
                 topology = topology,
                 blacklist = blacklist,
+                onUpdateRouting = onUpdateRouting,
                 onRefreshBlacklist = onRefreshBlacklist,
                 onBanClient = onBanClient,
                 onUnbanClient = onUnbanClient,
@@ -269,6 +271,7 @@ fun PageContent(
     exitSelections: List<cc.xlei.fuckipv6.android.bridge.ExitSelectionView>? = null,
     topology: cc.xlei.fuckipv6.android.bridge.TopologyView? = null,
     blacklist: cc.xlei.fuckipv6.android.bridge.BlacklistView? = null,
+    onUpdateRouting: ((mode: String, exitNode: String?, isExitNode: Boolean) -> Unit)? = null,
     onRefreshBlacklist: (() -> Unit)? = null,
     onBanClient: ((String) -> Unit)? = null,
     onUnbanClient: ((String) -> Unit)? = null,
@@ -405,7 +408,13 @@ fun PageContent(
                     selections = exitSelections,
                 )
             pageId == "routing" && routing != null ->
-                RoutingContent(contracts = contracts, locale = locale, summaries = routing)
+                RoutingContent(
+                    contracts = contracts,
+                    locale = locale,
+                    summaries = routing,
+                    networkName = selectedNetworkName,
+                    onUpdateRouting = onUpdateRouting,
+                )
             pageId == "networks" && networks != null ->
                 NetworksContent(contracts = contracts, locale = locale, networks = networks)
             pageId == "logs" && logs != null ->

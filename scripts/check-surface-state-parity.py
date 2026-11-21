@@ -30,10 +30,14 @@ DEFAULT_NAVIGATION = PROJECT_ROOT / "crates/common/assets/ui-navigation.json"
 DEFAULT_ANDROID_PAGE_SOURCE = (
     PROJECT_ROOT / "android/app/src/main/kotlin/cc/xlei/fuckipv6/android/ui/FuckIpv6App.kt"
 )
+DEFAULT_WEBUI_PAGE_SOURCE = PROJECT_ROOT / "webui/src/components/page-content.tsx"
+DEFAULT_GPUI_PAGE_SOURCE = PROJECT_ROOT / "crates/client/src/gpui/view_model.rs"
 
 ANDROID_ENTRY = re.compile(r'^\s*[A-Z][A-Z0-9_]*\("([a-z][a-z0-9_]*)"\)', re.MULTILINE)
 WEBUI_ENTRY = re.compile(r'^  ([a-z][a-z0-9_]*): \{', re.MULTILINE)
 ANDROID_PAGE_BRANCH = re.compile(r'pageId == "([a-z][a-z0-9_]*)"')
+WEBUI_PAGE_CASE = re.compile(r'^\s*case "([a-z][a-z0-9_]*)":', re.MULTILINE)
+GPUI_PAGE_ARM = re.compile(r'^\s*"([a-z][a-z0-9_]*)" => Some\(Self::', re.MULTILINE)
 CATALOG_STATE = re.compile(r"^state\.([a-z][a-z0-9_]*)\.title$")
 
 # `state-matrix.ts` also carries non-state blocks (for example the long-press
@@ -55,6 +59,22 @@ def parse_webui_states(path: Path) -> set[str]:
 def parse_navigation_pages(path: Path) -> set[str]:
     contract = json.loads(path.read_text(encoding="utf-8"))
     return {page for module in contract["modules"] for page in module["page_ids"]}
+
+
+def parse_webui_page_cases(path: Path) -> set[str]:
+    text = path.read_text(encoding="utf-8")
+    start = text.find('case "overview":')
+    if start < 0:
+        # Fixtures and future shells may not carry `overview`; scan the whole file
+        # then, which only makes the check stricter.
+        return set(WEBUI_PAGE_CASE.findall(text))
+    end = text.find("default:", start)
+    region = text[start : end if end > 0 else len(text)]
+    return set(WEBUI_PAGE_CASE.findall(region))
+
+
+def parse_gpui_page_arms(path: Path) -> set[str]:
+    return set(GPUI_PAGE_ARM.findall(path.read_text(encoding="utf-8")))
 
 
 def parse_android_page_branches(path: Path) -> set[str]:
@@ -79,6 +99,8 @@ def check(
     catalog: Path,
     navigation: Path | None = None,
     android_page_source: Path | None = None,
+    webui_page_source: Path | None = None,
+    gpui_page_source: Path | None = None,
 ) -> dict:
     errors: list[str] = []
     android_states = parse_android_states(android)
@@ -96,6 +118,20 @@ def check(
                 f"navigation page {page} has no explicit PageContent branch in FuckIpv6App; "
                 "it would fall through to the generic notice"
             )
+    webui_pages: set[str] = set()
+    gpui_pages: set[str] = set()
+    if pages and webui_page_source is not None:
+        webui_pages = parse_webui_page_cases(webui_page_source)
+        if not webui_pages:
+            errors.append("no WebUI page cases parsed; the extractor is out of date")
+        for page in sorted(pages - webui_pages):
+            errors.append(f"navigation page {page} has no case in the WebUI page switch")
+    if pages and gpui_page_source is not None:
+        gpui_pages = parse_gpui_page_arms(gpui_page_source)
+        if not gpui_pages:
+            errors.append("no GPUI page arms parsed; the extractor is out of date")
+        for page in sorted(pages - gpui_pages):
+            errors.append(f"navigation page {page} has no PageKind::from_id arm in GPUI")
 
     if not android_states:
         errors.append("no Android surface states parsed; the extractor is out of date")
@@ -125,6 +161,8 @@ def check(
         "android_only": sorted(android_states - webui_states),
         "navigation_pages": sorted(pages),
         "android_page_branches": sorted(branches),
+        "webui_page_cases": sorted(webui_pages),
+        "gpui_page_arms": sorted(gpui_pages),
         "errors": errors,
     }
 
@@ -136,11 +174,21 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
     parser.add_argument("--navigation", type=Path, default=DEFAULT_NAVIGATION)
     parser.add_argument("--android-page-source", type=Path, default=DEFAULT_ANDROID_PAGE_SOURCE)
+    parser.add_argument("--webui-page-source", type=Path, default=DEFAULT_WEBUI_PAGE_SOURCE)
+    parser.add_argument("--gpui-page-source", type=Path, default=DEFAULT_GPUI_PAGE_SOURCE)
     parser.add_argument("--report", type=Path, default=None)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
-    for path in (args.android, args.webui, args.catalog, args.navigation, args.android_page_source):
+    for path in (
+        args.android,
+        args.webui,
+        args.catalog,
+        args.navigation,
+        args.android_page_source,
+        args.webui_page_source,
+        args.gpui_page_source,
+    ):
         if not path.is_file():
             print(f"input not found: {path}", file=sys.stderr)
             return 2
@@ -152,6 +200,8 @@ def main(argv: Iterable[str] | None = None) -> int:
             args.catalog,
             navigation=args.navigation,
             android_page_source=args.android_page_source,
+            webui_page_source=args.webui_page_source,
+            gpui_page_source=args.gpui_page_source,
         )
     except ValueError as error:
         print(f"[FAIL] {error}", file=sys.stderr)

@@ -71,6 +71,16 @@ class SurfaceStateParityTest(unittest.TestCase):
             'if (pageId == "error") {\n}\nif (pageId == "ready") {\n}\n',
             encoding="utf-8",
         )
+        self.webui_pages = self.root / "page-content.tsx"
+        self.webui_pages.write_text(
+            'switch (page) {\n  case "error":\n  case "ready":\n  default:\n}\n',
+            encoding="utf-8",
+        )
+        self.gpui_pages = self.root / "view_model.rs"
+        self.gpui_pages.write_text(
+            'match id {\n    "error" => Some(Self::Error),\n    "ready" => Some(Self::Ready),\n    _ => None,\n}\n',
+            encoding="utf-8",
+        )
         self.android.write_text(ANDROID, encoding="utf-8")
         self.webui.write_text(WEBUI, encoding="utf-8")
 
@@ -148,6 +158,28 @@ class SurfaceStateParityTest(unittest.TestCase):
         )
         self.assertEqual(report["status"], "failed")
         self.assertTrue(any("ready" in error for error in report["errors"]))
+
+    def test_webui_and_gpui_must_dispatch_every_navigation_page(self) -> None:
+        self.write_catalog(["error", "ready", "not_available_on_device"])
+        base = dict(
+            navigation=self.navigation,
+            android_page_source=self.pages,
+            webui_page_source=self.webui_pages,
+            gpui_page_source=self.gpui_pages,
+        )
+        report = PARITY.check(self.android, self.webui, self.catalog, **base)
+        self.assertEqual(report["status"], "passed")
+        self.assertEqual(report["webui_page_cases"], ["error", "ready"])
+        self.assertEqual(report["gpui_page_arms"], ["error", "ready"])
+
+        self.webui_pages.write_text('switch (page) {\n  case "error":\n  default:\n}\n', "utf-8")
+        self.gpui_pages.write_text(
+            'match id {\n    "error" => Some(Self::Error),\n    _ => None,\n}\n', "utf-8"
+        )
+        report = PARITY.check(self.android, self.webui, self.catalog, **base)
+        self.assertEqual(report["status"], "failed")
+        self.assertTrue(any("WebUI page switch" in error for error in report["errors"]))
+        self.assertTrue(any("PageKind::from_id" in error for error in report["errors"]))
 
     def test_missing_input_is_an_operational_error(self) -> None:
         self.write_catalog(["error"])

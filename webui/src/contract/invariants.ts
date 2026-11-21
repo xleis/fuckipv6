@@ -55,6 +55,37 @@ import type {
   NodeUiPage,
   NetworkMemberDirectory,
 } from "../../../contracts/typescript/node-contract-v1";
+import {
+  ADMIN_RECOVERY_STATE_VALUES,
+  CAPABILITY_KIND_VALUES,
+  EXIT_CONTRIBUTION_OBLIGATION_VALUES,
+  MEMBER_LIFECYCLE_ACTION_VALUES,
+  MEMBER_LIFECYCLE_STATUS_VALUES,
+  NETWORK_MEMBER_OBSERVATION_SOURCE_VALUES,
+  NETWORK_MEMBER_ONLINE_STATE_VALUES,
+  NETWORK_MEMBER_STATUS_VALUES,
+  NETWORK_PROFILE_WARNING_CODE_VALUES,
+  NETWORK_VISIBILITY_VALUES,
+  NODE_NETWORK_ROLE_VALUES,
+  NODE_NETWORK_STATUS_VALUES,
+  NODE_PERMISSION_VALUES,
+  NODE_UI_AVAILABILITY_VALUES,
+  NODE_UI_INPUT_KIND_VALUES,
+  NODE_UI_VALIDATION_VALUES,
+  OPERATION_STATE_VALUES,
+  POLICY_CHANGE_KIND_VALUES,
+  POLICY_OBJECT_KIND_VALUES,
+  POLICY_RISK_LEVEL_VALUES,
+  POLICY_RISK_REASON_VALUES,
+  TRAFFIC_FAILURE_DECISION_REASON_VALUES,
+  TRAFFIC_FAILURE_OUTCOME_VALUES,
+  TRAFFIC_POLICY_CHANGE_KIND_VALUES,
+  TRAFFIC_POLICY_HISTORY_OUTCOME_VALUES,
+  TRAFFIC_POLICY_OBJECT_KIND_VALUES,
+  TRAFFIC_SESSION_EVENT_KIND_VALUES,
+  TUN_CAPABILITY_REASON_VALUES,
+} from "../../../contracts/typescript/node-contract-v1";
+
 import { ContractError } from "../api/client";
 import {
   parsePolicySnapshotJson,
@@ -203,137 +234,18 @@ const EXPECTED_ACTIONS: Record<string, string> = {
   shutdown_node: "shutdown",
 };
 
-const PERMISSIONS = new Set([
-  "view_state",
-  "manage_networks",
-  "change_routing",
-  "manage_roles",
-  "probe_peers",
-  "stop_node",
-  "view_logs",
-]);
-const AVAILABILITIES = new Set([
-  "always",
-  "node_running",
-  "node_stopped",
-  "network_online",
-  "network_selected",
-]);
+const PERMISSIONS = new Set<string>(NODE_PERMISSION_VALUES);
+const AVAILABILITIES = new Set<string>(NODE_UI_AVAILABILITY_VALUES);
 const BACKEND_STATUSES = new Set(["implemented", "unavailable"]);
-const OPERATION_STATES = new Set([
-  "queued",
-  "running",
-  "waiting_for_reauth",
-  "succeeded",
-  "failed",
-  "cancelled",
-  "timed_out",
-]);
+const OPERATION_STATES = new Set<string>(OPERATION_STATE_VALUES);
 const OPERATION_TERMINAL_STATES = new Set([
   "succeeded",
   "failed",
   "cancelled",
   "timed_out",
 ]);
-const INPUT_KINDS = new Set([
-  "boolean",
-  "client_id",
-  "external_host",
-  "network_mode",
-  "network_name",
-  "network_selection",
-  "peer_target",
-  "purpose",
-  "icon",
-  "language",
-  "region",
-  "tags",
-  "capability_declarations",
-  "visibility",
-  "join_mode",
-  "exit_contribution_mode",
-  "exit_contribution",
-  "exit_contribution_scope",
-  "exit_selection_policy_json",
-  "join_request_id",
-  "join_request_note",
-  "join_request_reason",
-  "join_request_review_action",
-  "join_request_reviews",
-  "node_id",
-  "member_lifecycle_action",
-  "member_lifecycle_reason",
-  "port",
-  "role",
-  "routing_mode",
-  "url_or_ticket",
-  "coordinator_url",
-  "coordinator_candidates_json",
-  "coordinator_willingness",
-  "invitation_code",
-  "admin_recovery_request_json",
-  "admin_recovery_request_id",
-  "admin_recovery_reason",
-  "timeout_ms",
-  "revision",
-  "configuration_json",
-  "policy_json",
-  "policy_snapshot_json",
-  "traffic_policy_json",
-  "traffic_policy_test_json",
-  "policy_network_ids",
-  "display_name",
-  "fingerprint",
-  "discovery_index_url",
-]);
-const VALIDATIONS = new Set([
-  "none",
-  "non_empty",
-  "network_name",
-  "port",
-  "distinct_ports",
-  "network_mode",
-  "network_selection",
-  "role",
-  "routing_mode",
-  "positive_timeout",
-  "revision",
-  "configuration_json",
-  "policy_json",
-  "policy_snapshot_json",
-  "traffic_policy_json",
-  "traffic_policy_test_json",
-  "policy_network_ids",
-  "display_name",
-  "fingerprint",
-  "network_purpose",
-  "network_icon",
-  "network_language",
-  "region",
-  "tags",
-  "capability_declarations",
-  "visibility",
-  "join_mode",
-  "exit_contribution_mode",
-  "exit_contribution",
-  "exit_contribution_scope",
-  "exit_selection_policy_json",
-  "join_request_id",
-  "join_request_note",
-  "join_request_reason",
-  "join_request_review_action",
-  "join_request_reviews",
-  "node_id",
-  "member_lifecycle_action",
-  "member_lifecycle_reason",
-  "coordinator_url",
-  "coordinator_candidates_json",
-  "coordinator_willingness",
-  "invitation_code",
-  "admin_recovery_request_json",
-  "admin_recovery_request_id",
-  "admin_recovery_reason",
-]);
+const INPUT_KINDS = new Set<string>(NODE_UI_INPUT_KIND_VALUES);
+const VALIDATIONS = new Set<string>(NODE_UI_VALIDATION_VALUES);
 const OUTCOME_STATUSES = new Set([
   "snapshot",
   "ui_manifest",
@@ -392,38 +304,11 @@ const LIFECYCLE_PHASES = new Set([
   "stopping",
   "failed",
 ]);
-const NETWORK_STATUSES = new Set([
-  "offline",
-  "connecting",
-  "online",
-  "degraded",
-  "stopping",
-  "failed",
-]);
-const NETWORK_ROLES = new Set(["member", "discovery", "relay", "exit_node"]);
+const NETWORK_STATUSES = new Set<string>(NODE_NETWORK_STATUS_VALUES);
+const NETWORK_ROLES = new Set<string>(NODE_NETWORK_ROLE_VALUES);
 const MEMBERSHIP_ROLES = new Set(["owner", "administrator", "member"]);
-const MEMBER_LIFECYCLE_ACTIONS = new Set([
-  "invite",
-  "approve",
-  "reject",
-  "suspend",
-  "resume",
-  "exit",
-  "remove",
-  "undo_remove",
-]);
-const MEMBER_LIFECYCLE_STATUSES = new Set([
-  "invited",
-  "pending_approval",
-  "approved",
-  "active",
-  "degraded",
-  "suspended",
-  "exited",
-  "removed",
-  "expired",
-  "rejected",
-]);
+const MEMBER_LIFECYCLE_ACTIONS = new Set<string>(MEMBER_LIFECYCLE_ACTION_VALUES);
+const MEMBER_LIFECYCLE_STATUSES = new Set<string>(MEMBER_LIFECYCLE_STATUS_VALUES);
 const MEMBER_REMOVAL_IMPACT_KEYS = new Set([
   "member_removal.impact.network_access",
   "member_removal.impact.file_access",
@@ -432,20 +317,9 @@ const MEMBER_REMOVAL_IMPACT_KEYS = new Set([
   "member_removal.impact.local_files_kept",
   "member_removal.impact.safe_undo",
 ]);
-const CAPABILITY_KINDS = new Set<CapabilityKind>([
-  "coordinator",
-  "relay",
-  "exit",
-  "file",
-]);
-const NETWORK_PROFILE_WARNING_CODES = new Set([
-  "unsigned_legacy",
-  "profile_expired",
-  "revision_conflict",
-  "capability_not_observed",
-  "capability_undeclared",
-]);
-const NETWORK_VISIBILITIES = new Set(["public", "unlisted", "private"]);
+const CAPABILITY_KINDS = new Set<string>(CAPABILITY_KIND_VALUES);
+const NETWORK_PROFILE_WARNING_CODES = new Set<string>(NETWORK_PROFILE_WARNING_CODE_VALUES);
+const NETWORK_VISIBILITIES = new Set<string>(NETWORK_VISIBILITY_VALUES);
 const NETWORK_JOIN_MODES = new Set([
   "open",
   "approval_required",
@@ -475,7 +349,7 @@ function canonicalExitContribution(
   };
 }
 
-const EXIT_CONTRIBUTION_OBLIGATIONS = new Set(["required", "not_required"]);
+const EXIT_CONTRIBUTION_OBLIGATIONS = new Set<string>(EXIT_CONTRIBUTION_OBLIGATION_VALUES);
 const EXIT_CONTRIBUTION_MODES = new Set([
   "autonomous",
   "required_on_join",
@@ -488,60 +362,12 @@ const EXIT_CONTRIBUTION_SCOPES = new Set([
   "all_members",
 ]);
 const TUN_PLATFORMS = new Set(["linux", "macos", "windows", "other"]);
-const TUN_CAPABILITY_REASONS = new Set([
-  "platform_unsupported",
-  "permission_denied",
-  "device_unavailable",
-  "tool_unavailable",
-  "unknown",
-]);
+const TUN_CAPABILITY_REASONS = new Set<string>(TUN_CAPABILITY_REASON_VALUES);
 
-const POLICY_OBJECT_KINDS = new Set<PolicyObjectKind>([
-  "local_policy",
-  "network_acl",
-  "permission_rule",
-  "network_acl_grant",
-  "contribution_veto",
-  "network_scope",
-]);
-const POLICY_CHANGE_KINDS = new Set<string>([
-  "local_policy_added",
-  "local_policy_updated",
-  "local_policy_removed",
-  "network_acl_added",
-  "network_acl_updated",
-  "network_acl_removed",
-  "permission_rule_added",
-  "permission_rule_updated",
-  "permission_rule_removed",
-  "grant_added",
-  "grant_updated",
-  "grant_removed",
-  "veto_added",
-  "veto_updated",
-  "veto_removed",
-  "network_scope_changed",
-  "validity_changed",
-]);
-const POLICY_RISK_LEVELS = new Set<PolicyRiskLevel>([
-  "none",
-  "elevated",
-  "high",
-]);
-const POLICY_RISK_REASONS = new Set<PolicyRiskReason>([
-  "allow_rule_added",
-  "deny_rule_removed",
-  "permission_rule_expanded",
-  "network_acl_grant_added",
-  "network_acl_grant_expanded",
-  "grant_reauthentication_removed",
-  "grant_validity_extended",
-  "local_policy_removed",
-  "network_acl_removed",
-  "network_scope_expanded",
-  "contribution_veto_removed",
-  "policy_validity_extended",
-]);
+const POLICY_OBJECT_KINDS = new Set<string>(POLICY_OBJECT_KIND_VALUES);
+const POLICY_CHANGE_KINDS = new Set<string>(POLICY_CHANGE_KIND_VALUES);
+const POLICY_RISK_LEVELS = new Set<string>(POLICY_RISK_LEVEL_VALUES);
+const POLICY_RISK_REASONS = new Set<string>(POLICY_RISK_REASON_VALUES);
 const POLICY_CHANGE_ACTIONS = new Set(["apply", "rollback"]);
 
 export type ActionValues = Record<string, string | boolean>;
@@ -1801,28 +1627,10 @@ function policyRolledBack(value: unknown): PolicyRollbackResult {
   return value as PolicyRollbackResult;
 }
 
-const TRAFFIC_POLICY_CHANGE_KINDS = new Set<TrafficPolicyChangeKind>([
-  "rule_added",
-  "rule_removed",
-  "rule_updated",
-  "rules_reordered",
-  "default_policy_changed",
-  "failure_policy_changed",
-]);
-const TRAFFIC_POLICY_OBJECT_KINDS = new Set<TrafficPolicyObjectKind>([
-  "rule",
-  "default_policy",
-  "failure_policy",
-  "network",
-  "exit",
-]);
+const TRAFFIC_POLICY_CHANGE_KINDS = new Set<string>(TRAFFIC_POLICY_CHANGE_KIND_VALUES);
+const TRAFFIC_POLICY_OBJECT_KINDS = new Set<string>(TRAFFIC_POLICY_OBJECT_KIND_VALUES);
 const TRAFFIC_POLICY_CHANGE_ACTIONS = new Set(["apply", "rollback"]);
-const TRAFFIC_POLICY_HISTORY_OUTCOMES = new Set([
-  "applied",
-  "rolled_back",
-  "failed",
-  "recovered",
-]);
+const TRAFFIC_POLICY_HISTORY_OUTCOMES = new Set<string>(TRAFFIC_POLICY_HISTORY_OUTCOME_VALUES);
 const TRAFFIC_FAILURE_KINDS = new Set([
   "unknown_application",
   "dns_resolution_timeout",
@@ -1844,15 +1652,7 @@ const TRAFFIC_PROTECTION_STATES = new Set<TrafficProtectionState>([
   "explicit_direct_fallback",
 ]);
 
-const TRAFFIC_SESSION_EVENT_KINDS = new Set([
-  "connecting",
-  "recovery_started",
-  "migration_started",
-  "failure_detected",
-  "protection_established",
-  "fail_closed",
-  "direct_fallback",
-]);
+const TRAFFIC_SESSION_EVENT_KINDS = new Set<string>(TRAFFIC_SESSION_EVENT_KIND_VALUES);
 
 function validateTrafficSessionSnapshot(value: unknown): void {
   if (!record(value)) fail("traffic session snapshot invalid");
@@ -1942,17 +1742,8 @@ function validateTrafficSessionSnapshot(value: unknown): void {
     }
   }
 }
-const TRAFFIC_FAILURE_OUTCOMES = new Set(["fail_closed", "direct_fallback"]);
-const TRAFFIC_FAILURE_REASONS = new Set([
-  "default_fail_closed",
-  "not_allowed_by_policy",
-  "explicit_direct_fallback",
-  "unsafe_failure_class",
-  "reject_rule",
-  "fixed_exit",
-  "fixed_network",
-  "direct_action_has_no_alternate",
-]);
+const TRAFFIC_FAILURE_OUTCOMES = new Set<string>(TRAFFIC_FAILURE_OUTCOME_VALUES);
+const TRAFFIC_FAILURE_REASONS = new Set<string>(TRAFFIC_FAILURE_DECISION_REASON_VALUES);
 const TRAFFIC_MATCH_RISK_KINDS = new Set([
   "always_matches",
   "any_destination",
@@ -3945,23 +3736,10 @@ export function commandEnvelope(
   };
 }
 
-const MEMBER_STATUSES = new Set([
-  "pending",
-  "approved",
-  "active",
-  "degraded",
-  "suspended",
-  "exited",
-  "removed",
-  "expired",
-]);
+const MEMBER_STATUSES = new Set<string>(NETWORK_MEMBER_STATUS_VALUES);
 const MEMBER_GROUPS = new Set(["owner", "administrator", "member"]);
-const MEMBER_PRESENCE_STATES = new Set(["online", "offline", "unknown"]);
-const MEMBER_OBSERVATION_SOURCES = new Set([
-  "live_session",
-  "disconnect_observed",
-  "not_observed",
-]);
+const MEMBER_PRESENCE_STATES = new Set<string>(NETWORK_MEMBER_ONLINE_STATE_VALUES);
+const MEMBER_OBSERVATION_SOURCES = new Set<string>(NETWORK_MEMBER_OBSERVATION_SOURCE_VALUES);
 
 function optionalNullableInteger(value: unknown, message: string): void {
   if (value !== undefined && value !== null) nonNegativeInteger(value, message);
@@ -4279,12 +4057,7 @@ function memberDirectory(value: unknown): NetworkMemberDirectory {
   return value as NetworkMemberDirectory;
 }
 
-const ADMIN_RECOVERY_STATES = new Set([
-  "pending",
-  "executed",
-  "revoked",
-  "expired",
-]);
+const ADMIN_RECOVERY_STATES = new Set<string>(ADMIN_RECOVERY_STATE_VALUES);
 
 function adminRecoveryStringList(value: unknown, message: string): string[] {
   const values = arrayValue(value, message).map((entry) =>

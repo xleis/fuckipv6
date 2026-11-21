@@ -4787,13 +4787,13 @@ DOM/契约断言，人工屏幕阅读器走查没有证据；"构建哈希绑定
 
 ### W18-04 Schema 与兼容闸门 `[ ]`
 
-- [ ] Rust/TypeScript/Android 类型从单一权威 schema 生成；
-- [ ] CI 检查生成漂移；
-- [ ] 命令、事件、错误和权限枚举版本化；
+- [x] Rust/TypeScript/Android 类型从单一权威 schema 生成；
+- [x] CI 检查生成漂移；
+- [x] 命令、事件、错误和权限枚举版本化；
 - [ ] schema 不兼容变化有迁移/拒绝策略；
 - [ ] 前端不手写重复领域枚举；
-- [ ] API 样本和契约测试覆盖所有命令；
-- [ ] OpenAPI/JSON Schema 与实现匹配；
+- [x] API 样本和契约测试覆盖所有命令；
+- [x] OpenAPI/JSON Schema 与实现匹配；
 - [ ] 发布记录 schema 版本。
 
 **验收**：不存在手工同步导致的类型漂移或未知命令静默成功。
@@ -4808,9 +4808,19 @@ DOM/契约断言，人工屏幕阅读器走查没有证据；"构建哈希绑定
 在本提交上不会失败。因此"CI 检查生成漂移"一条已具备本地等价证据，待 Verify 的 contracts job
 转绿后再勾选。
 
-**证据（2026-11-21，CI 契约 job 仍红，原因待日志确认）**：对 commit `f01518d` 触发的 run
-`44777644873` 中 `Node contract drift and bindings` 结论为 failure，而同一提交在本地跑完全部契约步骤
-通过且无漂移，说明失败点在本地未覆盖的前置步骤（依赖安装或工具版本），不在 Rust/TS/Java 契约本身。
+**证据（2026-11-21，CI 契约 job 转绿，run `44857799539` / commit `bcd398e`）**：`Node contract drift and
+bindings` 结论 **success**。此前同 job 一直红，根因不在契约本身而在 runner 缺 `fontconfig.pc` 与
+`libxcb`/`libxkbcommon` 的 dev 包——客户端的测试二进制经 GPUI 平台层拉入 X11，链接失败让 job 在跑到
+断言前就退出。补齐后 CI 与本地的每一步（`node::contract` 8 项、bindings `--check`、TS `check` +
+`build:test`、`test_contract_bindings.mjs`、`javac` + `NodeContractV1Test`、`generate-contracts.sh` 后
+零漂移）都成立，因此第 1、2、3、6、7 五条据此勾选：
+第 1 条由同一份 schema 生成 Rust/TS/Java 三个消费者；第 2 条是 CI 的 `Reject generated drift` 转绿；
+第 3 条是 schema 的 `schema_version` 与命令/事件/错误/权限枚举的版本化产物；
+第 6 条是 `visible_actions_exactly_cover_canonical_action_commands` 与 8 项契约测试覆盖全量命令；
+第 7 条是 `checked_in_schema_artifacts_are_current` 要求签入产物与实现一致。
+
+第 4、5、8 条不勾：迁移/拒绝策略目前只有"不兼容即失败关闭"，没有版本迁移脚本；前端仍有
+手工维护的领域枚举（`webui/src/contract/invariants.ts` 自带取值集合）；发布记录里尚无 schema 版本字段。
 
 ### W18-05 视觉与交互回归 `[ ]`
 

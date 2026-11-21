@@ -4908,14 +4908,19 @@ bindings` 结论 **success**。此前同 job 一直红，根因不在契约本�
 `TRAFFIC_*`、`POLICY_*`、`ADMIN_RECOVERY_STATES` 等），元素类型保持 `string` 以沿用现有调用方。
 typecheck、lint、349 项单测、build、i18n 与可访问性探针在改动后全部通过。
 
-剩余 15 个分两类：**6 个**（`LIFECYCLE_PHASES`、`MEMBERSHIP_ROLES`、`MEMBER_GROUPS`、
-`POLICY_CHANGE_ACTIONS`、`TRAFFIC_POLICY_CHANGE_ACTIONS`、`TUN_PLATFORMS`）有多个值集相同的候选，
-需要按语义挑定一个，不能由值集自动匹配；**9 个**（`BACKEND_STATUSES`、`OPERATION_TERMINAL_STATES`、
-`OUTCOME_STATUSES`、`MEMBER_REMOVAL_IMPACT_KEYS`、`NETWORK_JOIN_MODES`、`EXIT_CONTRIBUTION_MODES`、
+剩余 15 个分两类，其中**5 个歧义项已按语义判定**：`LIFECYCLE_PHASES` → `NODE_PHASE_VALUES`（节点阶段，
+不是 embedded service 状态）、`MEMBERSHIP_ROLES` → `MEMBERSHIP_ROLE_VALUES`、`MEMBER_GROUPS` →
+`NETWORK_MEMBER_GROUP_VALUES`（两个契约枚举取值相同但语义不同，各取其所指）、
+`POLICY_CHANGE_ACTIONS` 与 `TRAFFIC_POLICY_CHANGE_ACTIONS` → `POLICY_CHANGE_ACTION_VALUES`。
+`TUN_PLATFORMS` 保留本地定义，因为契约把平台表达为 inline union（`TunCapabilities` 内），没有独立值数组。
+至此 **33/43** 个集合来自生成产物。
+
+剩余 10 个仍手写（`BACKEND_STATUSES`、`OPERATION_TERMINAL_STATES`、`OUTCOME_STATUSES`、
+`MEMBER_REMOVAL_IMPACT_KEYS`、`NETWORK_JOIN_MODES`、`EXIT_CONTRIBUTION_MODES`、
 `EXIT_CONTRIBUTION_SCOPES`、`TRAFFIC_FAILURE_KINDS`、`TRAFFIC_PROTECTION_STATES`、
-`TRAFFIC_MATCH_RISK_KINDS`）在生成产物里没有对应枚举——它们有的是前端特有的展示映射，有的来自
-inline union（如 `NodeUiBackendStatus`），后者需要生成器为 inline enum 也产出值数组才能消除手写。
-本条因此仍不勾：重复已从 43 处降到 15 处，但"不手写重复领域枚举"尚未满足。
+`TRAFFIC_MATCH_RISK_KINDS`、`TUN_PLATFORMS`）——它们在前端是展示映射或派生判定（如"终态"是状态的
+子集、"影响键"是 i18n 键），剩下的真正重复项来自 inline union，要消除需要生成器对 inline enum
+也产出值数组。本条因此仍不勾：重复从 43 处降到 10 处，但"不手写重复领域枚举"尚未满足。
 
 ### W18-05 视觉与交互回归 `[ ]`
 

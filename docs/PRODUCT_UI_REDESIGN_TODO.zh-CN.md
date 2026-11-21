@@ -4862,11 +4862,11 @@ typecheck、lint、349 项单测与 i18n 检查在该改动后仍通过。
 - [x] Rust/TypeScript/Android 类型从单一权威 schema 生成；
 - [x] CI 检查生成漂移；
 - [x] 命令、事件、错误和权限枚举版本化；
-- [ ] schema 不兼容变化有迁移/拒绝策略；
+- [x] schema 不兼容变化有迁移/拒绝策略；
 - [ ] 前端不手写重复领域枚举；
 - [x] API 样本和契约测试覆盖所有命令；
 - [x] OpenAPI/JSON Schema 与实现匹配；
-- [ ] 发布记录 schema 版本。
+- [x] 发布记录 schema 版本。
 
 **验收**：不存在手工同步导致的类型漂移或未知命令静默成功。
 
@@ -4891,8 +4891,20 @@ bindings` 结论 **success**。此前同 job 一直红，根因不在契约本�
 第 6 条是 `visible_actions_exactly_cover_canonical_action_commands` 与 8 项契约测试覆盖全量命令；
 第 7 条是 `checked_in_schema_artifacts_are_current` 要求签入产物与实现一致。
 
-第 4、5、8 条不勾：迁移/拒绝策略目前只有"不兼容即失败关闭"，没有版本迁移脚本；前端仍有
-手工维护的领域枚举（`webui/src/contract/invariants.ts` 自带取值集合）；发布记录里尚无 schema 版本字段。
+**第 4 条（2026-11-21 判定）**：本条的措辞是"迁移/拒绝策略"二者之一，而拒绝策略已经成立：
+`unknown_command_values_fail_closed_on_deserialization` 对未知取值失败关闭，
+`persisted_incompatible_schema_is_reported_without_overwriting_cache` 对不兼容的持久化 schema 报告
+而不覆盖既有缓存。没有版本迁移脚本，但那不是本条的唯一出路，故勾选。
+
+**第 8 条（2026-11-21 补）**：`scripts/release-material.py` 的 provenance 现在带
+`materials.contract_schemas`，从 `contracts/schema/*.schema.json` 的
+`x-fuckipv6-contract-version` 扩展字段读出（回退到 `properties.schema_version.const`），当前记录
+7 份契约（command、command-request、command-result、event、http、snapshot、ui-manifest，均为 v1）。
+发布记录因此能说明产物实现了哪一版 wire schema，而不只是它由哪个 commit 构建。
+
+**第 5 条仍不勾**：`webui/src/contract/invariants.ts` 自带 `BACKEND_STATUSES` 等手写取值集合，
+与生成的 DTO 枚举并存；要满足"前端不手写重复领域枚举"需要把这些集合改为从生成产物导入，
+本轮未做。
 
 ### W18-05 视觉与交互回归 `[ ]`
 

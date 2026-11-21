@@ -440,6 +440,9 @@ def build_provenance(
         "materials": {
             "cargo_lock_sha256": lock_sha256,
             "rustc": cargo_command(["--version"]).strip(),
+            # The shipped binary speaks a versioned contract; a release record that
+            # omits it cannot say which wire schema the artifact implements.
+            "contract_schemas": contract_schema_versions(),
         },
         "builder": {
             "id": builder,
@@ -453,6 +456,25 @@ def build_provenance(
             "statement": "Unsigned provenance metadata generated from the checked-out source tree.",
         },
     }
+
+
+def contract_schema_versions() -> dict[str, Any]:
+    """Read the checked-in schema versions the artifact implements."""
+    versions: dict[str, Any] = {}
+    schema_dir = PROJECT_ROOT / "contracts"
+    for path in sorted(schema_dir.rglob("*.schema.json")):
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        version = document.get("x-fuckipv6-contract-version")
+        if version is None:
+            version = document.get("properties", {}).get("schema_version", {}).get("const")
+        if version is None:
+            version = document.get("schema_version")
+        if version is not None:
+            versions[str(path.relative_to(PROJECT_ROOT))] = version
+    return versions
 
 
 def write_json(path: Path, document: dict[str, Any]) -> None:

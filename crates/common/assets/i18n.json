@@ -3378,7 +3378,10 @@
       "blacklist.action.unban": "解除",
       "blacklist.input.label": "客户端标识",
       "exit.action.enable": "开启本机 Exit",
-      "exit.action.disable": "关闭本机 Exit"
+      "exit.action.disable": "关闭本机 Exit",
+      "onboarding.configure.detail": "填入节点地址（本机节点通常是 http://127.0.0.1:7788）与访问令牌后连接。",
+      "onboarding.action.connect": "连接节点",
+      "onboarding.token_note": "令牌只保存在本机，不会同步到任何其他位置。"
     },
     "en": {
       "nav.overview": "Overview",
@@ -6756,7 +6759,10 @@
       "blacklist.action.unban": "Unban",
       "blacklist.input.label": "Client id",
       "exit.action.enable": "Enable local Exit",
-      "exit.action.disable": "Disable local Exit"
+      "exit.action.disable": "Disable local Exit",
+      "onboarding.configure.detail": "Enter the node address (a local node is usually http://127.0.0.1:7788) and the access token, then connect.",
+      "onboarding.action.connect": "Connect",
+      "onboarding.token_note": "The token stays on this device and is never synced anywhere else."
     }
   }
 }

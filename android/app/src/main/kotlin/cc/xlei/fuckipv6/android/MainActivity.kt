@@ -87,6 +87,9 @@ import kotlinx.coroutines.launch
 import cc.xlei.fuckipv6.android.contract.SharedContractLoader
 import cc.xlei.fuckipv6.android.ui.ContractFailureScreen
 import cc.xlei.fuckipv6.android.ui.FuckIpv6App
+import cc.xlei.fuckipv6.android.ui.OnboardingPage
+import cc.xlei.fuckipv6.android.ui.OnboardingProjection
+import cc.xlei.fuckipv6.android.ui.OnboardingStep
 import cc.xlei.fuckipv6.android.ui.FuckIpv6Theme
 
 class MainActivity : ComponentActivity() {
@@ -353,6 +356,9 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // Hoisted out of the composable: reading the system locale inside
+        // composition is not observable and Compose lint rejects it.
+        val uiLocale = java.util.Locale.getDefault()
         setContent {
             val bridgeState by remember(node) {
                 node?.state() ?: MutableStateFlow<BridgeState>(BridgeState.NotConfigured)
@@ -394,9 +400,26 @@ class MainActivity : ComponentActivity() {
             val invitationsState = invitations.collectAsState().value
             val issuedCodeState = issuedInvitationCode.collectAsState().value
             val blacklistState = blacklist.collectAsState().value
+            val apiUrl = getSharedPreferences(PREFERENCES, MODE_PRIVATE)
+                .getString(KEY_API_URL, null)
             FuckIpv6Theme {
                 contracts.fold(
                     onSuccess = {
+                        val onboarding = OnboardingProjection.decide(
+                            loadApiConfig(intent),
+                            bridgeState,
+                        )
+                        if (onboarding.step != OnboardingStep.READY) {
+                            OnboardingPage(
+                                contracts = it,
+                                locale = uiLocale,
+                                state = onboarding,
+                                savedUrl = apiUrl,
+                                hasSavedToken = hasSavedToken(),
+                                onConnect = { url, token -> saveApiConfig(url, token) },
+                            )
+                            return@fold
+                        }
                         FuckIpv6App(
                             contracts = it,
                             relay = relay,
@@ -813,6 +836,19 @@ class MainActivity : ComponentActivity() {
      * them the app shows the unavailable surface instead of probing a guessed
      * address.
      */
+    private fun hasSavedToken(): Boolean =
+        !getSharedPreferences(PREFERENCES, MODE_PRIVATE)
+            .getString(KEY_API_TOKEN, null).isNullOrBlank()
+
+    /** Persists the first-run address and token, then restarts the shell. */
+    private fun saveApiConfig(url: String, token: String) {
+        getSharedPreferences(PREFERENCES, MODE_PRIVATE).edit()
+            .putString(KEY_API_URL, url)
+            .putString(KEY_API_TOKEN, token.ifBlank { null })
+            .apply()
+        recreate()
+    }
+
     private fun loadApiConfig(intent: Intent?): NodeApiConfig? {
         val preferences = getSharedPreferences(PREFERENCES, MODE_PRIVATE)
         val url = intent?.getStringExtra(EXTRA_API_URL)

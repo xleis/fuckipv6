@@ -5126,10 +5126,12 @@ GitHub/OpenSSH/AWS/Slack token 形态，以及仓库根 `client_key.pem` 的实�
 `coordinator.toml` 本身**未被 Git 跟踪**（在 `.gitignore` 内），因此风险只来自误嵌入，而扫描正是针对这一点；
 Coordinator 旧 WebUI 里出现 `client_key.pem` 字样是 HTML 示例文本，不是凭据，故未列入模式。
 
-其余四条不勾，缺口逐条列出：**第 2 条**工作流用 `dtolnay/rust-toolchain@stable`，stable 不 pin 具体版本，
+其余四条不勾（第 4 条只完成一半），缺口逐条列出：**第 2 条**工作流用 `dtolnay/rust-toolchain@stable`，stable 不 pin 具体版本，
 不满足"工具链固定"；**第 3 条**脚本自述"does not sign artifacts or produce a SLSA attestation"，
-只有校验和与未签名 provenance；**第 4 条**`dist` 里没有 WebUI/Android 资产的独立哈希记录，构建产物
-`app.js` 目前只是随源码提交；**第 6 条**发布说明停留在 CHANGELOG 的自由文本，没有"能力/限制/迁移"
+只有校验和与未签名 provenance；**第 4 条**（2026-11-21 补了一半）新增 `scripts/record-webui-assets.sh`，对
+`crates/client/src/webui/dist` 逐文件生成排序后的 sha256 清单（当前 5 个文件：
+`index.html`、`assets/app.css`、`assets/app.js` 与两个 worker），三条 package job 都会记录；
+Android 侧的 APK/AAB 哈希仍缺，因此本条不勾；**第 6 条**发布说明停留在 CHANGELOG 的自由文本，没有"能力/限制/迁移"
 结构化清单。
 
 ### W18-11 发布阻断逐项签核 `[ ]`

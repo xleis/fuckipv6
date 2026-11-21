@@ -4841,6 +4841,21 @@ DOM/契约断言，人工屏幕阅读器走查没有证据；"构建哈希绑定
   因此该差异不能记为"平台必要项"。第 2、3 两条因此都还不能勾：拓扑页只覆盖了单网络场景，
   五模块与活动面本身正在变动。跨端对齐应由两端的设计 owner 决定以哪一侧为准，本轮只留证不替改。
 
+**补充（2026-11-21，CI 复跑给出更精确的两段差异）**：同一页在 GitHub runner 上（lavapipe 而非本机
+llvmpipe）失败形态不同，说明差异不止一处。CI 的 `activity` 高度两端其实一致（GPUI 195.5 vs
+WebUI 195.6875），真正偏差是两段：
+
+1. **字体度量段**：`hero` 高 GPUI 108 vs WebUI 99.98（+8.0）、`hero_copy` 76 vs 65.98（+10.0），
+   其后 `networks`、`networks_heading`、`network_first`、`network_second` 的 `y` 一致偏 +7.7～8.0；
+2. **结构性段**：`activity` 之后又叠加 +73.4～73.8（`activity`、`activity_empty`、`activity_heading`、
+   `shortcuts`、`shortcut_first` 的 `y` 全部偏约 73.6），使 `overview_stack` 总高变成 GPUI 689 vs
+   WebUI 615.59（+73.4）；`max_delta_px=73.7813`，容差 1.5。
+
+第 1 段是两端行高/字体度量不同（10 px 量级），可以论证为平台必要项；第 2 段是 activity 区块之后的
+65 px 结构性空间，无法用字体解释——它才是让 `rmse` 越过 22 的主因。由于本机与 CI 的失败形态不一致
+（本机是高度差 96 px、CI 是高度一致但整体下移 73 px），说明该页布局正处在两端同时改动之中，
+不宜按单次快照对齐。两段数值都留档，等两端设计 owner 定侧后再改。
+
 ### W18-06 网络质量与抗干扰证据 `[ ]`
 
 - [x] Exit 真实访问 Google/YouTube；

@@ -3205,6 +3205,24 @@ cycle 7 时双向 P2P 均 healthy、ICMP 5/5、canary 12/12 通过、RSS/FD 采�
 拓扑与上一实例相同（三 netns 正式邀请入网 + 直连 P2P），cycle 1 已通过，预计
 2026-11-21T22:02Z 结束并写出 `soak/summary.json`。本实例跑满且 `verdict == "ok"` 后才勾选本项。
 
+**2026-11-21 第二次中断：长时切片与同宿主门禁互斥**：该 r2 实例在运行 20 分钟后失去节点。
+`node1/node.log` 在 2026-11-20T22:21:00Z 记录「接收到退出信号，正在关闭 WebUI；节点网络与控制面保持运行」，
+随后 `网络 [w12-soak] 已安全下线`，进程退出；`soak/events.jsonl` 同一时刻记录 `ping_2_to_1` 与两侧
+canary 转为不健康，此后每个 cycle 的 `node1_peer`/`node2_peer` 均为 `null`、双向 ICMP 为 0/5。
+`soak_loop.py` 本身没有退出，继续空转到 cycle 136（2.25 小时）仍在写无效样本，直到手工 `TERM`
+进程组才停止（workdir 保留为 `/tmp/w12-soak-24h-r2` 供核对）。
+
+退出信号的发射方没有定位到具体进程：该时段宿主上并行跑的是库内门禁（`governance-evidence.py`、
+`visual-regression.mjs`、`cargo test --workspace`），`governance-evidence.py` 的 12 个 check 全部是
+`cargo test` 域测试、不含 `pkill`/`kill`，仓库内也不存在第二个使用 `w12soak*` 命名空间的脚本。
+可以确定的是**结论**：24 小时切片必须独占宿主，与其它会拉起真实 node 的门禁共享同一台机器时会被打断，
+而且打断后没有任何一方负责恢复——这正是本项第 7 条（用户不需要手工 kill）与 W18-08 第 5、7 条要求
+回答的失败模式，此前只有 2026-11-13 事故一例证据，现在有了可复现的第二例。
+
+**2026-11-21 第三次启动**：r3 实例于 2026-11-20T00:18Z 启动（`W12_SOAK_WORK=/tmp/w12-soak-24h-r3`），
+二进制与 r2 相同（提交 `e5de708` 构建，`sha256` 前缀 `fe85d8df5af77ef1`），同样以 `setsid` 脱离会话，
+cycle 1 通过，预计 2026-11-21T00:18Z+24h 结束。启动前已确认宿主机上没有其它 netns 验收脚本在运行。
+
 **验收**：没有 24 小时稳定性与多场景证据时，不得给出“抗干扰强”或“长期可用”结论。
 
 ### W12-10 Exit 页面与活动 `[x]`

@@ -34,7 +34,10 @@ class SnapshotFrameCoalescer(
      * when this call scheduled a refresh.
      */
     fun onFrame(frame: NodeEventFrame): Boolean {
-        val cursor = frame.cursor ?: frame.latestCursor
+        // `resumeToken()` is the node's `sequence:snapshot_revision` form; the
+        // bare `cursor` string would resume with a sequence only and lose the
+        // revision the node needs to decide whether a replay is required.
+        val cursor = frame.resumeToken() ?: frame.latestCursor
         if (cursor != null) {
             resumeCursor = cursor
         }

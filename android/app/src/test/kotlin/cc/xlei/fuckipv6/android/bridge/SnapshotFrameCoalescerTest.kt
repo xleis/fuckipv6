@@ -38,7 +38,8 @@ class SnapshotFrameCoalescerTest {
         assertTrue(coalescer.onFrame(frame(sequence = 3)))
         delay(400)
         assertEquals(1, pulls.get())
-        assertEquals("3:0", coalescer.resumeCursor())
+        // No snapshot revision was reported, so the node's token is a bare sequence.
+        assertEquals("3", coalescer.resumeCursor())
     }
 
     @Test

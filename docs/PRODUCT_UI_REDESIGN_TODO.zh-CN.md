@@ -2876,6 +2876,17 @@ DNS/NSS 停止后逐字节恢复，证据 `/tmp/w12-exit-local.20261120T152050Z.
 （`/tmp/w12-exit-local.20261120T141143Z.320177` 与本次之前一次 17,022/16,998 包）。两侧证据均来自隔离 netns，
 WAN 侧仍受下述环境限制。
 
+**2026-11-26 WAN 复跑（root 真实 NAT）**：宿主恢复 root 后用 musl 静态二进制（SHA-256
+`$(sha256sum target/x86_64-unknown-linux-musl/release/fuckipv6 | cut -d' ' -f1)`）重跑同一脚本。授权链全部通过
+（候选角色、Exit 授权目录、贡献策略、terms 确认、单次邀请入网、`update_routing` 投影 `default_action=exit`），
+但成员到 Exit 的直连 P2P 仍为 `p2p_healthy=false`、`loss_rate=1.0`（对端端点包含 `101.36.116.21:33269`，
+RTT 2.15 s），协调者候选请求与成员目录刷新持续 `超时`，Exit 侧同时记录
+`relay.grant.local_policy_denied`（我们写入的本地策略只有 `exit_contribution`、没有 allow 规则，Relay Use 默认
+拒绝），因此 relay 兜底也不可用，会话停在 protected 之前、客户端继续失败关闭丢弃代理流量。根因在环境：本机位于
+NAT 之后，宿主转发的 UDP 被路由器 OpenClash 透明代理拦截；把客户端放到宿主网络命名空间又能直连，但会接管宿主
+默认路由/TUN，属于事故红线禁止的操作。因此 WAN 侧 Exit 下载证据仍未取得，本项保持 `[~]`；同时记下一条产品观察：
+**空规则（默认拒绝）的本地访问策略会连 Relay Use 一起拒绝**，做 Exit 验收时必须同时授权 Relay，否则没有兜底路径。
+
 **2026-11-20 WAN 版复跑结论**：`scripts/test-w12-exit-download-wan.sh` 已补齐与本地版相同的授权链（远端 IPC 改为
 stdin 传 JSON、候选声明 15 分钟上限并在会话前刷新、`apply_policy` 贡献策略、`exit_contribution_mode=autonomous`、
 Exit 目录固定选择、owner terms 确认）。在无 root 的 slirp 上行环境中仍无法进入 protected：

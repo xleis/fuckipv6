@@ -4962,11 +4962,16 @@ WebUI 195.6875），真正偏差是两段：
 修到这一层后脚本连续暴露了两层：先是 `tabTo` 无法用 Tab 到达 freeze 控件——原因不是焦点顺序，而是
 **选择器过时**：该按钮把标签写在可见文本里（`<span>{label(locale, "topology.freeze.freeze")}</span>`），
 只有 zoom-reset 与 locate-current 用 `aria-label`；改成按名字匹配后仍然到不了，进一步发现它在
-`<details class="topology-options">` 里，默认折叠，必须先用键盘展开。两处都修好之后，脚本停在第五层：
-**locate-current 在 Tab 顺序里位于那个 disclosure 之前**，从展开的面板内部继续 Tab 只会往后走，
-永远回不到它。这不是选择器问题而是控件摆放与遍历顺序的问题，需要把检查顺序改成"先 locate-current，
-再展开面板取 freeze"，或让面板关闭后把焦点交还。第 4 条仍不勾：脚本已修到这一层，屏幕阅读器走查
-（条目另外要求的）也还没有。第 4 条仍不勾：键盘导航与按网络渲染已对齐，
+`<details class="topology-options">` 里，默认折叠，必须先用键盘展开。两处修好之后暴露了后面两层：同一段的第一处是**顺序**——`locate-current` 在 DOM 里位于那个
+disclosure 之前，从展开的面板内部继续 Tab 只会往后走，永远回不到它；把检查顺序改成"先
+locate-current、再展开取 freeze"之后仍然到不了，于是看到第六层、也是真正的原因：
+`<button aria-label="…locate.current" disabled={!focusTargetNodeId}>` —— **它是被 disabled 的**，
+而 disabled 元素根本不在 tab order 里。要访问它必须先选中一个节点让 `focusTargetNodeId` 有值，
+即把这个一次性控制扫描拆成"先选节点、再回到工具栏"两段。
+
+第 4 条仍不勾。这一轮在这条脚本上花的时间已经超过它可能带来的价值：每次修一层都只是暴露下一层，
+而条目本身还要求屏幕阅读器走查（目前没有任何证据）。后续要么按上述两段式重写整段，要么承认
+自研 CDP 脚本覆盖不到这条用例并改用别的工具。第 4 条仍不勾：键盘导航与按网络渲染已对齐，
 长按/右键/焦点恢复与 freeze 控件三段待办。
 
 ### W18-06 网络质量与抗干扰证据 `[x]`

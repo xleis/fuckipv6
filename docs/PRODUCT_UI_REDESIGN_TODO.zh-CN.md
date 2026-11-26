@@ -4619,6 +4619,15 @@ Android 单测共 146 项通过。W16-01 仍缺真机验收，保持 `[ ]`。
 
 ### W18-01 功能闭环审计 `[ ]`
 
+**补充（2026-11-26，功能—证据映射表）**：第 8 条要求的映射表此前不存在。现在由 `scripts/feature-evidence-matrix.py`
+（+6 项自测）从 `contracts/typescript/fixtures/node-manifest.json`（随包发布的权威 manifest）生成
+`docs/FEATURE_EVIDENCE.zh-CN.md`：**77 个可见动作**，逐行给出页面、动作、命令、权限、审计策略、后端状态与证据文件；
+当前分布是 **implemented 71 / 未实现 6**（后者正是 W11 流量策略的六个入口）。校验规则是硬的：证据列必须是仓库内
+**真的提到该命令**的源文件（`command.rs` / `runtime_handler.rs` / `ui_manifest.rs`），缺失即失败；`--check` 模式要求
+磁盘上的表与 manifest 完全一致，因此 manifest 增删动作而忘记重新生成也会失败。已接入 release gate 的必选检查
+`feature-evidence` 与 `verify.yml`。本条据此勾选——剩下未勾的是"遍历全部控件"、"Coordinator/Relay/Exit/File 全能力"、
+"Android 与桌面能力矩阵"三条，它们要么需要人工走查，要么需要真机能力快照。
+
 - [ ] 遍历五模块全部可见控件和动作；
 - [x] 每个动作绑定真实后端命令、权限、operation、活动和恢复；
 - [x] 删除所有只返回 `Unavailable`、静态成功或假数据的入口；
@@ -4626,7 +4635,7 @@ Android 单测共 146 项通过。W16-01 仍缺真机验收，保持 `[ ]`。
 - [x] 核对多网络、发现、审批、治理和隐私；
 - [ ] 核对 Android 与桌面能力矩阵；
 - [x] 核对旧双 WebUI 已移除或被禁用；
-- [ ] 形成功能—证据映射表。
+- [x] 形成功能—证据映射表（`docs/FEATURE_EVIDENCE.zh-CN.md` 由 `scripts/feature-evidence-matrix.py` 从共享 manifest 生成，77 个可见动作逐行给页面/命令/权限/审计策略/后端状态/证据；证据列必须指向**真实提到该命令**的源文件，缺失或对不上直接失败，`--check` 还要求磁盘上的表与 manifest 同步）。
 
 **验收**：不存在“看起来可用但实际未闭环”的发布阻断项。
 

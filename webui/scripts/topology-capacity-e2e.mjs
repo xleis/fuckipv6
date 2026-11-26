@@ -657,9 +657,10 @@ async function waitFor(session, expression, description, timeoutMs = 20_000) {
 async function waitForReady(session, timeoutMs = 20_000) {
   await waitFor(
     session,
+    // Same fix as the keyboard walk: readiness must not key on a desktop-only element.
     `Boolean(
       document.querySelector(".app-shell") &&
-      document.querySelector(".nav-footer")?.textContent?.includes("Live")
+      document.body.textContent?.includes("Running normally")
     )`,
     "WebUI product shell and live event connection",
     timeoutMs,
@@ -692,7 +693,7 @@ async function navigateToTopology(session) {
   const clickedModule = await evaluate(
     session,
     `(() => {
-      const button = [...document.querySelectorAll(".module-button")].find(
+      const button = [...document.querySelectorAll(".module-button, .bottom-navigation-item")].find(
         (element) => element.textContent?.trim() === "Networks",
       );
       button?.click();
@@ -700,24 +701,26 @@ async function navigateToTopology(session) {
     })()`,
   );
   assert.equal(clickedModule, true);
+  // The shell switched from a tablist to a <details> page switcher; waiting for a
+  // role=tab entry could never match again.
   await waitFor(
     session,
-    `[...document.querySelectorAll('[role="tab"]')].some(
-      (element) => element.textContent?.trim() === "Topology",
-    )`,
-    "Topology page tab",
+    `Boolean(document.querySelector(".page-switcher"))`,
+    "page switcher",
   );
-  const clickedTab = await evaluate(
+  const clickedPage = await evaluate(
     session,
     `(() => {
-      const tab = [...document.querySelectorAll('[role="tab"]')].find(
-        (element) => element.textContent?.trim() === "Topology",
-      );
-      tab?.click();
-      return Boolean(tab);
-    })()`,
+       const summary = document.querySelector(".page-switcher > summary");
+       if (summary instanceof HTMLElement) summary.click();
+       const item = [...document.querySelectorAll('.page-switcher-menu [role="menuitemradio"]')].find(
+         (element) => element.textContent?.trim() === "Topology",
+       );
+       if (item instanceof HTMLElement) item.click();
+       return Boolean(item);
+     })()`,
   );
-  assert.equal(clickedTab, true);
+  assert.equal(clickedPage, true);
 }
 
 async function setSearchValue(session, value) {

@@ -1125,10 +1125,13 @@ async function main() {
     const reconnectAuthority =
       fixtureServer.advanceAuthoritativeSnapshotDuringDisconnect();
     const reconnectStartedAt = Date.now();
+    // The row count is the selected network's membership, so the stale node shows up as a
+    // count one lower than before the reconnect rather than as fixture NODE_COUNT.
+    const rowCountBeforeReconnect = listCounts.ariaRowCount;
     await waitFor(
       cdp,
       `document.querySelector(".topology-view[data-view='list']") &&
-       document.querySelector(".topology-list-table table")?.getAttribute("aria-rowcount") === "1000"`,
+       Number(document.querySelector(".topology-list-table table")?.getAttribute("aria-rowcount")) === ${"${rowCountBeforeReconnect - 1}"}`,
       "authoritative resync after reconnect removes a stale node",
       10_000,
     );

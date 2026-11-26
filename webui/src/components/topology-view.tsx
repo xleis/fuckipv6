@@ -1916,8 +1916,11 @@ function ListView({
       virtualizer.scrollToIndex(rowIndex, { align: "center" });
       const focusWhenMounted = (attempt: number): void => {
         if (focusRequestTokenRef.current !== requestToken) return;
-        if (tryFocusPendingRow() || attempt >= 30) {
-          if (attempt >= 30) pendingFocusRowIdRef.current = null;
+        // A jump to the far end of a large virtual list needs more than half a second:
+        // scrollToIndex has to mount a new window first, and abandoning the focus there
+        // leaves the keyboard user on <body>.
+        if (tryFocusPendingRow() || attempt >= 120) {
+          if (attempt >= 120) pendingFocusRowIdRef.current = null;
           return;
         }
         focusTimerRef.current = window.setTimeout(

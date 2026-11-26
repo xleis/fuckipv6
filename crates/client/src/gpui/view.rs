@@ -11662,7 +11662,7 @@ impl GpuiShell {
         let path_names = visible_nodes
             .iter()
             .filter(|node| path_ids.contains(&node.node_id.as_str().to_string()))
-            .map(&display_name)
+            .map(display_name)
             .collect::<Vec<_>>();
         let path_summary = if path_names.is_empty() {
             t(self.locale, "topology.path.empty").to_string()
@@ -11712,7 +11712,7 @@ impl GpuiShell {
                 (
                     "exit",
                     &exit_node
-                        .map(&display_name)
+                        .map(display_name)
                         .unwrap_or_else(|| t(self.locale, "common.none").to_string()),
                 ),
             ],
@@ -12613,12 +12613,12 @@ impl GpuiShell {
                 let from_name = visible_nodes
                     .iter()
                     .find(|node| node.node_id == connection.from)
-                    .map(&display_name)
+                    .map(display_name)
                     .unwrap_or_else(|| connection.from.as_str().to_string());
                 let to_name = visible_nodes
                     .iter()
                     .find(|node| node.node_id == connection.to)
-                    .map(&display_name)
+                    .map(display_name)
                     .unwrap_or_else(|| connection.to.as_str().to_string());
                 (
                     tr(

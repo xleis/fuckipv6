@@ -36,11 +36,11 @@ pub use controller::{
 use file_api::FileWebState;
 use fuckipv6_common::domain::{AuditExportFilter, PasskeyCredentialId};
 use fuckipv6_common::i18n::{LanguagePreference, Locale};
-use fuckipv6_coordinator::signaling::session::PeerSnapshot;
-use fuckipv6_coordinator::webui::{
+use fuckipv6_coordinator::dto::{
     BlacklistActionRequest, BlacklistActionResponse, NetworkConfigApiResponse, NetworkConfigDto,
     UpdateNetworkConfigRequest,
 };
+use fuckipv6_coordinator::signaling::session::PeerSnapshot;
 use public_claim::PublicClaimConfig;
 use security::{http_url, MutationRateLimiter, WebUiAuth, WebUiConfig, WebUiLoginError};
 use serde::{Deserialize, Serialize};

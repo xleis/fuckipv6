@@ -6,8 +6,8 @@ use fuckipv6_common::domain::{
 #[cfg(test)]
 use fuckipv6_common::domain::{MembershipRole, MembershipState, NetworkId};
 use fuckipv6_common::NetworkTicket;
+use fuckipv6_coordinator::dto::{NetworkConfigDto, UpdateNetworkConfigRequest};
 use fuckipv6_coordinator::signaling::session::{PeerSnapshot, TrafficSnapshot};
-use fuckipv6_coordinator::webui::{NetworkConfigDto, UpdateNetworkConfigRequest};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fmt;

@@ -587,6 +587,10 @@ impl SessionManager {
     }
 
     /// 列出当前网络作用域内的持久授权撤销记录。
+    #[allow(dead_code)]
+    // Revocation governance API: these were reachable only through the coordinator
+    // console that W0-03 removed. The capability stays (persistent revocation is a
+    // security guarantee) but no surface calls it until the CLI or new UI wires it up.
     pub(crate) async fn list_authorization_revocations(
         &self,
     ) -> Result<Vec<fuckipv6_common::NetworkAuthorizationRevocation>> {
@@ -602,6 +606,10 @@ impl SessionManager {
     /// 仅当节点在线时，按其 ID 解析当前公钥并持久撤销。
     ///
     /// 返回 `None` 表示该节点当前不在线；不会使用黑名单或仅凭节点 ID 伪造公钥。
+    #[allow(dead_code)]
+    // Revocation governance API: these were reachable only through the coordinator
+    // console that W0-03 removed. The capability stays (persistent revocation is a
+    // security guarantee) but no surface calls it until the CLI or new UI wires it up.
     pub(crate) async fn try_revoke_node_by_client_id(
         &self,
         client_id: &str,
@@ -620,6 +628,10 @@ impl SessionManager {
     /// `lift_authorization` 以节点 ID 或公钥指纹匹配，因此这里生成一个不会与
     /// 其他记录指纹冲突的内部探针，继续复用 `try_lift_revocation` 的授权门和
     /// 存储错误语义。返回 `None` 表示当前网络没有该节点的撤销记录。
+    #[allow(dead_code)]
+    // Revocation governance API: these were reachable only through the coordinator
+    // console that W0-03 removed. The capability stays (persistent revocation is a
+    // security guarantee) but no surface calls it until the CLI or new UI wires it up.
     pub(crate) async fn try_lift_revocation_by_client_id(
         &self,
         client_id: &str,
@@ -1806,6 +1818,8 @@ impl IpAllocator {
 /// 底层解撤销接口会同时匹配节点 ID 和公钥指纹。由于撤销记录只保存指纹，
 /// 离线节点无法恢复原始公钥；该探针必须避开目录内所有已有指纹，确保本次操作
 /// 只能通过精确的节点 ID 删除目标记录。
+// Reached from the lift path; kept for the revocation tests.
+#[allow(dead_code)]
 fn non_colliding_lift_probe(
     records: &[fuckipv6_common::NetworkAuthorizationRevocation],
 ) -> [u8; 32] {

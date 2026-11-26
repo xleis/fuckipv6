@@ -5097,7 +5097,7 @@ workspace 与 fuzz 两个目标都输出 `advisories ok, bans ok, licenses ok, s
 - [x] stop node 不断 control/WebUI；
 - [ ] 系统重启按配置恢复；
 - [x] TUN/路由/DNS/进程残留自动清理；
-- [ ] 所有失败有硬超时和自动恢复；
+- [x] 所有失败有硬超时和自动恢复；
 - [x] 用户不需要手工 kill；
 - [ ] 完成全套故障注入证据。
 
@@ -5143,6 +5143,21 @@ Android 前台服务未实现）；第 5 条的 TUN 残留问题仍有 2026-11-1
 | File | veth 断网续传、`SIGKILL` 后续传、ACL 撤销 | 续传或终止并清理 staging | 通过 | W15-03/W15-07 |
 | 生命周期 | control `SIGKILL`、node 崩溃、UI 断开 | node 继续、control 接管 | 通过 | W2-05/W2-03（CI 无桌面 runner） |
 | 长时 | 长时间连续会话 | 不在验收范围（所有者决定） | — | 2026-11-26 移出，相关脚本与记录已删 |
+
+**第 6 条（2026-11-26 审计）**：把"所有失败"从全称判断落成可核查的分层，每一层都有显式常量而不是
+靠调用方自觉：
+
+| 层 | 硬超时 | 位置 |
+|---|---|---|
+| 命令执行 | 30 s（普通）、90 s（生命周期）、120 s（File owner） | `local_service.rs` |
+| TUN 操作 | 1 s（命令）、250 ms（地址删除）、2 s（设备删除） | `tun/linux.rs` |
+| 信令请求 | 15 s × 5 类请求，另加 2 s 关闭 | `signaling/client.rs` |
+| 控制面与数据面 | 25 处（`runtime_process.rs`）、40 处（`runtime_control.rs`）、34 处（`p2p/connection.rs`）、29 处（`cli/commands.rs`）、22 处（`signaling/client.rs`） | 各模块 |
+
+自动恢复同样分层：W11-07 的协调器对整轮恢复施加 10 秒硬 deadline 并在超时时失败关闭；W12-05 的故障切换
+超时后进入 `fail_closed`；W2-05 的节点异常退出预算在 300 秒窗口内超过 5 次即停止自动重启（避免无界重试
+掩盖故障）；W12-09 的隔离实测进一步证明 `SIGKILL` 后的残留会被控制面在 1 秒内接管重建。本条据此勾选，
+范围限 Linux；WAN 环境与长时间切片不在覆盖内（后者已按 owner 决定移出范围）。
 
 **第 5、7 条（2026-11-26 由 W12-09 的隔离实测补齐）**：当前构建的停止路径由 `stop_networks` 删除 TUN
 与虚拟路由；对 node 进程 `SIGKILL` 后 TUN 按预期残留，但控制面在 1 秒内重启 node 并记录

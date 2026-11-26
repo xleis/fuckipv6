@@ -5051,6 +5051,15 @@ Escape 关闭并恢复焦点、zoom-in/reset、展开 options 后 freeze（断�
 窄屏阶段已改为**显式开关**（`TOPOLOGY_E2E_MOBILE=1` 才尝试），默认跳过并在输出里列为 skipped：
 移动外壳隐藏了 page switcher 与拓扑搜索框，需要一整套自己的选择器，硬凑只会让整条脚本长期为红。
 
+键盘脚本已接入 CI：`verify.yml` 的 `visual-regression` job 在既有浏览器 E2E 之后、上传 visual 报告之前
+以 `xvfb-run -a node webui/scripts/topology-keyboard-e2e.mjs` 运行它，复用该 job 已装的 xvfb、Chrome 与
+webui 依赖，不需要新增 job。
+
+另外两条拓扑脚本**同样陈旧**，本轮只修了已知的两层：`topology-capacity-e2e.mjs` 的就绪判定（同
+nav-footer 依赖）与页切换器（同 tablist 依赖）已改，但仍停在自己的模块查找上，因此**没有接入 CI**；
+`topology-member-e2e.mjs` 连就绪之前的 `waitFor` 都还在等 "Networks page tab"。三条脚本里只有键盘这条
+达到可门禁状态。
+
 第 4 条仍不勾：屏幕阅读器走查依旧没有证据，而那一半不是脚本能提供的。第 4 条仍不勾：键盘导航与按网络渲染已对齐，
 长按/右键/焦点恢复与 freeze 控件三段待办。
 

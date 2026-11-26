@@ -5060,7 +5060,10 @@ nav-footer 依赖）与页切换器（同 tablist 依赖）已改，但仍停在
 `topology-capacity-e2e.mjs` 本轮又修了四层（窄屏下的抽屉触发器、图标化后的视图切换 `aria-label`、
 图预算提示与列表行数改为按**选中网络**而不是 fixture 的 1,000 计数、列表虚拟化阈值），现在跑到
 "按 End 跳到最后一个虚拟行"就停了——诊断显示 `activeTag=body`，焦点根本不在行上，属于和键盘脚本同类的
-焦点归属问题。`topology-member-e2e.mjs` 连就绪之前的 `waitFor` 都还在等 "Networks page tab"。
+焦点归属问题。`topology-member-e2e.mjs` 连就绪之前的 `waitFor` 都还在等 "Networks page tab"，而且它的
+`actionCardExpression` 依赖 `.action-card-head` 的文本匹配——本轮按同样模式改到能进 Networks 页之后，
+又卡在 "Create invitation" 这张卡片的文本匹配上（`.action-card-head` 现在是 `<button>`，文本里带图标与
+空白）。已经回退，没有留下半改状态：**三条脚本共用同一套陈旧假设，应该一起重写，而不是第三次逐层打补丁。**
 三条脚本里只有键盘这条达到可门禁状态，另外两条**都没有接入 CI**。
 
 **容量脚本的末段（2026-11-26）**：修到列表虚拟化后又过了三处（虚拟化阈值、按网络的行数、重连后的

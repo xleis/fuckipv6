@@ -59,6 +59,7 @@ COMMON_REQUIRED_CHECKS = (
     "format",
     "helper-tests",
     "single-binary",
+    "ignored-tests",
     "docs",
     "check",
     "test",
@@ -374,6 +375,7 @@ def helper_test_arguments() -> list[str]:
         "scripts/test_check_docs.py",
         "scripts/test_check_android_i18n.py",
         "scripts/test_check_surface_state_parity.py",
+        "scripts/test_check_ignored_tests.py",
         "-v",
     ]
 
@@ -639,6 +641,19 @@ def run_gate(args: argparse.Namespace) -> int:
             "single-binary",
             (sys.executable, "scripts/check-single-binary.py"),
             artifact_root / "single-binary.log",
+            env=env,
+        )
+    )
+    checks.append(
+        run_logged(
+            "ignored-tests",
+            (
+                sys.executable,
+                "scripts/check-ignored-tests.py",
+                "--report",
+                str(artifact_root / "ignored-tests.json"),
+            ),
+            artifact_root / "ignored-tests.log",
             env=env,
         )
     )

@@ -1069,12 +1069,40 @@ async fn connect_with_retry(endpoint: SocketAddr) -> Result<TestSocket> {
 // nftables partition helpers (privileged variant)
 // ---------------------------------------------------------------------------
 
-fn apply_partition(netns: &str, host_ip: &str) -> Result<()> {
+fn apply_partition(netns: &str, coordinator_ip: &str) -> Result<()> {
     let _ = restore_partition(netns);
     run_command(
         "ip",
         &[
             "netns", "exec", netns, "nft", "add", "table", "inet", NF_TABLE,
+        ],
+    )?;
+    // Block both directions for the Coordinator's namespace IP. Filtering on
+    // `output` with `ip daddr <coordinator_ip>` matched nothing because replies
+    // from the Coordinator carry `<coordinator_ip>` as their source address.
+    run_command(
+        "ip",
+        &[
+            "netns", "exec", netns, "nft", "add", "chain", "inet", NF_TABLE, "in", "{", "type",
+            "filter", "hook", "input", "priority", "0", ";", "}",
+        ],
+    )?;
+    run_command(
+        "ip",
+        &[
+            "netns",
+            "exec",
+            netns,
+            "nft",
+            "add",
+            "rule",
+            "inet",
+            NF_TABLE,
+            "in",
+            "ip",
+            "daddr",
+            coordinator_ip,
+            "drop",
         ],
     )?;
     run_command(
@@ -1087,8 +1115,19 @@ fn apply_partition(netns: &str, host_ip: &str) -> Result<()> {
     run_command(
         "ip",
         &[
-            "netns", "exec", netns, "nft", "add", "rule", "inet", NF_TABLE, "out", "ip", "daddr",
-            host_ip, "drop",
+            "netns",
+            "exec",
+            netns,
+            "nft",
+            "add",
+            "rule",
+            "inet",
+            NF_TABLE,
+            "out",
+            "ip",
+            "saddr",
+            coordinator_ip,
+            "drop",
         ],
     )?;
     Ok(())

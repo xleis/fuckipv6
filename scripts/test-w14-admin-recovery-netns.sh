@@ -21,6 +21,7 @@ HOST_IP="10.242.1.1"
 COORDINATOR_IP="10.242.1.10"
 WORK_ENV="FUCKIPV6_W14_ADMIN_RECOVERY_NETNS_WORK"
 REPORT_ENV="FUCKIPV6_W14_ADMIN_RECOVERY_REPORT"
+INNER_ENV="FUCKIPV6_W14_ADMIN_RECOVERY_NETNS_INNER"
 
 info() {
     printf '[INFO] %s\n' "$*"
@@ -56,15 +57,19 @@ require_root() {
 }
 
 require_tools() {
-    for tool in cargo ip nft ping timeout; do
+    for tool in cargo ip mount nft ping timeout unshare; do
         if ! command -v "$tool" >/dev/null 2>&1; then
             fail "missing required tool: $tool"
         fi
     done
+    if ! unshare --net --mount --fork --propagation private true >/dev/null 2>&1; then
+        skip "network/mount namespace creation is unavailable"
+    fi
 }
 
 create_topology() {
     cleanup_topology
+    ip link set lo up
     ip netns add "$NETNS"
     ip link add "$HOST_LINK" type veth peer name "$PEER_LINK"
     ip link set "$PEER_LINK" netns "$NETNS"
@@ -109,6 +114,21 @@ main() {
     fi
     export CARGO_TARGET_DIR="${FUCKIPV6_W14_ADMIN_RECOVERY_CARGO_TARGET_DIR:-${PROJECT_ROOT}/target}"
     trap cleanup EXIT INT TERM
+
+    if [ "${!INNER_ENV:-}" != "1" ]; then
+        info "prebuilding the W14 administrator recovery netns test"
+        cargo test \
+            --manifest-path "$PROJECT_ROOT/Cargo.toml" \
+            -p fuckipv6-coordinator \
+            --test w14_admin_recovery_multinode \
+            --no-run
+        export "${INNER_ENV}=1"
+        info "entering isolated network and mount namespaces"
+        exec unshare --net --mount --fork --propagation private -- "$0" "$@"
+    fi
+
+    mkdir -p /var/run/netns
+    mount -t tmpfs tmpfs /var/run/netns
 
     run_test
     [ -s "${!REPORT_ENV}" ] || fail "W14 administrator recovery drill report was not written: ${!REPORT_ENV}"

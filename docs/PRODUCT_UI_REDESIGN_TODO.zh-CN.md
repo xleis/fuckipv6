@@ -4957,8 +4957,14 @@ WebUI 195.6875），真正偏差是两段：
 `renderedNodes` 只渲染 `layout.placements` 里有的节点，而 placemet 按可见网络生成。因此"home 下看到
 2 个节点"是**按选中网络渲染**的设计结果，旧断言 3 编码的是已经不存在的行为。断言已改为 2 并写明原因。
 
-修到这一层后脚本停在下一处：`tabTo` 无法用 Tab 到达 "freeze control"（焦点停在 body）。这是第三层
-脚本债（治理冻结控件的可达性），需要单独核对。第 4 条仍不勾：键盘导航与按网络渲染已对齐，
+修到这一层后脚本连续暴露了两层：先是 `tabTo` 无法用 Tab 到达 freeze 控件——原因不是焦点顺序，而是
+**选择器过时**：该按钮把标签写在可见文本里（`<span>{label(locale, "topology.freeze.freeze")}</span>`），
+只有 zoom-reset 与 locate-current 用 `aria-label`；改成按名字匹配后仍然到不了，进一步发现它在
+`<details class="topology-options">` 里，默认折叠，必须先用键盘展开。两处都修好之后，脚本停在第五层：
+**locate-current 在 Tab 顺序里位于那个 disclosure 之前**，从展开的面板内部继续 Tab 只会往后走，
+永远回不到它。这不是选择器问题而是控件摆放与遍历顺序的问题，需要把检查顺序改成"先 locate-current，
+再展开面板取 freeze"，或让面板关闭后把焦点交还。第 4 条仍不勾：脚本已修到这一层，屏幕阅读器走查
+（条目另外要求的）也还没有。第 4 条仍不勾：键盘导航与按网络渲染已对齐，
 长按/右键/焦点恢复与 freeze 控件三段待办。
 
 ### W18-06 网络质量与抗干扰证据 `[x]`

@@ -41,7 +41,30 @@
 3. 若失败在 `test` 且耗时异常长，先怀疑阻塞读或超时预算，而不是断言；
 4. 若 job 是 `cancelled` 而非 `failure`，先看 `timeout-minutes`，不要当成内容失败。
 
-## 四、一次成功的基线
+## 四、发布工作流的步骤与注意点
+
+`release.yml` 的 package job 现在依次做这些事，每一步都有踩过的理由：
+
+1. `Install Rust`（pin `1.100.0`）与 `Install Node.js`——后者是必需的，因为下面要重建 webui；
+2. **用发布 commit 重建嵌入式 webui**：`FUCKIPV6_BUILD_COMMIT="${GITHUB_SHA}" npm run build --prefix webui`。
+   检入的 `dist` 故意只写 `buildCommit="unknown"`（否则产物会跟踪 HEAD，每提交一次就要重建一次），
+   真正可追溯的 commit 由发布这一步注入，`cargo build` 通过 `include_str!` 把它带进二进制；
+3. `Build`（`cargo build --release --workspace`）；
+4. `Package` → tar/zip；
+5. `Generate release notes`：`scripts/release-notes.py`，**任何未填写的节都会失败**（`--allow-placeholder-migration`
+   只用于草稿），避免发布说明停在骨架；
+6. `Record WebUI asset hashes`：`scripts/record-webui-assets.sh`，对 `dist` 逐文件 sha256；
+7. `Scan the binary for development credentials`：PEM 私钥头、token 形态与 `client_key.pem` 的实际密钥体；
+8. `Generate SBOM, provenance, and checksums`：`scripts/release-material.py`，provenance 里带
+   `materials.contract_schemas`（7 份契约，均 v1）；
+9. **签名**：`cosign sign-blob --yes --bundle dist/<package>.sigstore.json <artifact>`。用 bundle 而不是
+   `--output-signature`/`--output-certificate`——后者已从当前的 sigstore 文档示例里消失，而这里无法本地验证，
+   按文档写法风险更低。
+
+已知的、尚未在真实 CI 上验证的部分：上面第 2、5、6、7、9 步都是 2026-11-21 之后加的，**一次都没运行过**
+（凭据失效）。审查方式只有静态对照（YAML 解析、脚本干跑、上游文档），所以第一次真跑时要优先看这五步。
+
+## 五、一次成功的基线
 
 run `44879084747`（commit `ec596ab`）的 Linux gate 全绿，可作为对照：
 

@@ -58,7 +58,7 @@
 | W9 成员、组与拓扑 | `[~]` | P1 | W8 | 成员列表、邀请审批、组目录和拓扑聚合已完成；多网络视觉、交互、性能与 E2E 进行中 |
 | W10 安全与隐私 | `[x]` | P1 | W9 | 权限模型与矩阵、ACL/拒绝优先/本地否决、字段级隐私、策略编辑器与测试器、差异预览/原子应用/回滚、权威活动时间线、可验证长期审计、安全页面状态和可重复治理证据闭环均已完成 |
 | W11 流量路由 | `[~]` | P1 | W7,W10 | W11-01 四类决策与首条命中、W11-02 匹配条件、W11-03 应用身份与子进程继承、W11-04 未知应用与失败策略、W11-05 规则测试器领域契约、W11-06 原子应用/差异/回滚/崩溃恢复、W11-07 有界自动恢复协调器契约和 W11-09 隔离路由 E2E/失败关闭/网络报告已完成；W11-08 WebUI 已接入同一权威页面的结构化编辑、测试、应用、历史和回滚入口，GPUI 已接入同一页面的权威投影、规则/目标/影响展示和精确跳转，真实命中观测、GPUI/WebUI/Android 三端一致、生产后端接线及真实平台监听/适配待完成 |
-| W12 Exit | `[~]` | P1 | W10,W11 | W12-01 至 W12-05、W12-08 和 W12-10 已完成：本机启停、贡献治理、管理员选择、分层健康、故障切换/撤权及 Exit 页面权威分层均有自动化证据；W12-06 已完成真实 Chrome DNS、IPv4/IPv6 受控/外部探测与失败关闭复核，IPv6 外部目标仍为 `not_tested` 且保持 `fail_closed_required=true`；W12-07 已验证 Google/YouTube 页面、实际视频播放、DNS/TLS/H2/H3 和 TUN 源路径，但 yt-dlp 媒体下载仍 403；W12-08 已完成香港 Exit 对直连基线的 DNS/RTT/TCP/TLS/H3、单流吞吐和并发实测，并定位瓶颈到香港 co-located Relay/Exit 数据路径；独立 netns 已通过正式邀请入网后的双向 P2P ICMP 与直接 UDP 路径，真实香港节点随后完成 IPv4/IPv6 双向 ICMP、TCP 262144 字节、UDP 65536 字节/64 包和精确路由验收，并通过真实增量证明 IPv4 目标流量归入规范 IPv6 Peer 身份且两侧 Peer/网络级 P2P 计数一致；两侧 Exit 可达已完成，W12-07 的非浏览器完整文件下载与自动 DNS 清理仍待完成（WAN 侧受环境限制）；2026-11-16 补充香港主机的双 control/TUN/日志残留审计与清理、稳态探测与重启预算修复；2026-11-20 修复全新网络无法进入 online 的候选治理启动边界（bootstrap 恢复投影、客户端冻结条件、候选配置与 owner 声明 bootstrap），W12-09 干扰注入矩阵 8 例通过、1 例因产品无 QUIC→TCP 降级而跳过；W12-07 已在隔离 netns 打通 Exit 数据面：候选角色、Exit 授权目录、贡献策略与 terms 确认四段授权齐备后，成员 8 MiB 下载 HTTP 200（1.26 MB/s），客户端 TUN 17,512 包与 Exit TUN 17,497 包两侧同流，`stop_networks` 清理 TUN/路由；WAN 版仍受 slirp NAT 下 P2P 不健康所限、反向"两侧 Exit 可达"未做；W12-09 干扰矩阵 9 例通过（1 例因无 QUIC→TCP 降级跳过），两种 Exit 角色摆位均验证，TUN 残留自愈与重复 control 拒绝两项缺口已用当前构建关闭，全部条目完成；长时间浸泡按 2026-11-26 所有者决定移出范围（相关脚本与记录已删） |
+| W12 Exit | `[x]` | P1 | W10,W11 | W12-01 至 W12-05、W12-08 和 W12-10 已完成：本机启停、贡献治理、管理员选择、分层健康、故障切换/撤权及 Exit 页面权威分层均有自动化证据；W12-06 已完成真实 Chrome DNS、IPv4/IPv6 受控/外部探测与失败关闭复核，IPv6 外部目标仍为 `not_tested` 且保持 `fail_closed_required=true`；W12-07 已验证 Google/YouTube 页面、实际视频播放、DNS/TLS/H2/H3 和 TUN 源路径，但 yt-dlp 媒体下载仍 403；W12-08 已完成香港 Exit 对直连基线的 DNS/RTT/TCP/TLS/H3、单流吞吐和并发实测，并定位瓶颈到香港 co-located Relay/Exit 数据路径；独立 netns 已通过正式邀请入网后的双向 P2P ICMP 与直接 UDP 路径，真实香港节点随后完成 IPv4/IPv6 双向 ICMP、TCP 262144 字节、UDP 65536 字节/64 包和精确路由验收，并通过真实增量证明 IPv4 目标流量归入规范 IPv6 Peer 身份且两侧 Peer/网络级 P2P 计数一致；两侧 Exit 可达已完成，W12-07 的非浏览器完整文件下载与自动 DNS 清理仍待完成（WAN 侧受环境限制）；2026-11-16 补充香港主机的双 control/TUN/日志残留审计与清理、稳态探测与重启预算修复；2026-11-20 修复全新网络无法进入 online 的候选治理启动边界（bootstrap 恢复投影、客户端冻结条件、候选配置与 owner 声明 bootstrap），W12-09 干扰注入矩阵 8 例通过、1 例因产品无 QUIC→TCP 降级而跳过；W12-07 已在隔离 netns 打通 Exit 数据面：候选角色、Exit 授权目录、贡献策略与 terms 确认四段授权齐备后，成员 8 MiB 下载 HTTP 200（1.26 MB/s），客户端 TUN 17,512 包与 Exit TUN 17,497 包两侧同流，`stop_networks` 清理 TUN/路由；WAN 版仍受 slirp NAT 下 P2P 不健康所限、反向"两侧 Exit 可达"未做；W12-09 干扰矩阵 9 例通过（1 例因无 QUIC→TCP 降级跳过），两种 Exit 角色摆位均验证，TUN 残留自愈与重复 control 拒绝两项缺口已用当前构建关闭，全部条目完成；长时间浸泡按 2026-11-26 所有者决定移出范围（相关脚本与记录已删）；2026-11-26 收尾：W12-07 的最后一项（非浏览器客户端）由隔离 netns 经 Exit 的 8 MiB curl 下载关闭，W12-09 的生命周期缺口全部关闭；WAN 公网 Exit 下载因本机 NAT 后路由器透明代理拦截转发 UDP（P2P loss=1.0）、relay 默认拒绝而保留为 `not_tested`，属环境限制并在正文写明 |
 | W13 Relay | `[x]` | P1 | W10 | W13-01 至 W13-07 已完成：独立热启停、intent 持久化、稳定失败原因码、双侧签名授权、拒绝优先、实时撤权、既有会话策略、owner-only 治理审计和 durable audit 导出均有自动化证据；真实 Relay 子进程运营者导出只含最小 usage/health/governance 字段，不包含载荷、虚拟地址、密钥或显示名；生产数据面故障转移写入同一 owner audit 链并合并到活动快照，临时 Coordinator Relay 冻结检查已覆盖。Linux 单 Relay 进程 SIGKILL/重启后的端口复用、旧会话不可接管和新证书恢复、真实子进程连接风暴/慢连接/资源上限/吞吐/延迟/CPU/RSS、满载期间 Snapshot/Manifest 可用性及 Relay/Coordinator/Exit 同时故障恢复均有进程或 netns 证据。GPUI、WebUI 与 Android Compose Relay 页面现统一消费共享 Manifest、`NodeSnapshot`、健康/治理投影和 `SetNetworkRole` 命令；Android 在快照或真实命令回调缺失时失败关闭，不注入示例状态。Android 的 VpnService、节点 IPC 和真机 E2E 仍归 W16，不在本项冒充平台数据面完成 |
 | W14 Coordinator 接管 | `[x]` | P1 | W10,W12,W13 | W14-01 至 W14-10 全部完成：候选组与签名声明、任期/租约/fencing、严格多数接管、分区无多数保护、旧 Leader 只读恢复、紧急临时 Leader、临时权限冻结、管理员阈值恢复、数据面连续性以及脑裂/断电/netns 故障演练均有自动化与真实进程证据；有界穷举交错扫描、真实多进程 SIGKILL/SIGSTOP 矩阵、QEMU 断电与多节点离线 Trustee 恢复演练补齐了残余路径 |
 | W15 File | `[~]` | P2 | W10 | W15-02/03/05/07 已完成（ACL 与字段隐私、上传下载与续传、符号链接与竞态、撤权与中断）；本地 domain/ACL/路径/临时文件/续传适配器、GPUI owner 设置与 IPC、GPUI/WebUI File 目录浏览/目标选择/上传下载/分页/暂停恢复/取消、并发/速率/磁盘/扫描/审计上界已落地；Linux 独立三节点真实网络传输、恢复与四槽满载控制面隔离验收已完成，Android File 表面/SAF、Windows/macOS 实机路径安全与传输竞态、跨平台验收及 OS/性能资源基线仍未完成 |
@@ -2781,13 +2781,13 @@ Chrome 查询经 `127.0.0.1 -> 127.0.0.2:53` 被 DNS pcap 捕获。IPv4 受控�
 
 **验收**：DNS、IPv4 与 IPv6 泄漏测试有可复核证据；任何未测试路径不得标记通过。
 
-### W12-07 Google、YouTube 与 ALPN/H2/H3 `[~]`
+### W12-07 Google、YouTube 与 ALPN/H2/H3 `[x]`
 
 - [x] 通过真实 Exit 访问 Google 和 YouTube；
 - [x] 验证页面加载、视频分片播放和持续会话；
 - [x] 覆盖 DNS、TLS、HTTP/2 和可用的 HTTP/3；
 - [x] 区分所有流量经过 Exit 与仅终端 curl 成功；
-- [~] 验证至少一个非浏览器客户端；
+- [x] 验证至少一个非浏览器客户端（`curl -4` 经 Exit 下载 8 MiB HTTP 200，两种角色摆位各一次；日志与抓包见本节 WAN/隔离 netns 记录）；
 - [x] 记录失败域名、错误和恢复动作；
 - [x] 测试前后检查本机网络未被破坏；
 - [x] 单次成功不得标记“稳定可用”。
@@ -2893,6 +2893,13 @@ Exit 目录固定选择、owner terms 确认）。在无 root 的 slirp 上行�
 成员快照 `p2p_healthy=false`（slirp 无入站映射，双向健康判定不成立），且成员目录刷新持续
 `审批控制请求超时`，Exit 贡献授权随之失败关闭；客户端对代理流量保持 `丢弃数据包`，没有回退直连。这属于测试
 网络环境限制（需要真实 root 网络或公网可达客户端），不是产品判定，也不改变本地版已取得的 Exit 数据面证据。
+
+**2026-11-26 W12-07 收尾**：最后一项"至少一个非浏览器客户端"由隔离 netns 的 Exit 验收关闭——成员在受保护会话里用
+`curl -4` 经 Exit 下载 8 MiB（HTTP 200，两种角色摆位各一次，客户端/Exit 两侧 TUN 抓包同流），停止后
+`resolv.conf`/`nsswitch.conf` 逐字节恢复。WAN 公网版脚本保留为独立可复现用例，并在缺少 root 或静态二进制时以
+`[SKIP]`（退出码 77）显式跳过；其已知环境限制（本机 NAT 后路由器透明代理拦截转发 UDP 导致 `p2p_healthy=false`、
+loss=1.0；默认拒绝的本地策略连 Relay Use 一并拒绝）记录在下面的 WAN 段落，标为 `not_tested`，不以环境限制改写
+为通过或失败。
 
 **验收**：报告证明真实应用流量通过 Exit 可达目标，且测试后有明确清理结果。
 

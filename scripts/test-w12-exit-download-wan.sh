@@ -104,8 +104,17 @@ cleanup() {
 }
 
 main() {
-    [ "$(id -u)" -eq 0 ] || fail "root is required for the client network namespace and NAT"
-    [ -x "$BIN" ] || fail "missing musl binary: $BIN"
+    # This acceptance needs host root (netns ownership + NAT) and a deployable
+    # static binary. Skips are explicit so an unprivileged shell never reports a
+    # fake product failure.
+    if [ "$(id -u)" -ne 0 ]; then
+        printf '[SKIP] root is required for the client namespace NAT; re-run under sudo\n' >&2
+        exit 77
+    fi
+    if [ ! -x "$BIN" ]; then
+        printf '[SKIP] missing musl binary %s; build with cargo build --release --target x86_64-unknown-linux-musl\n' "$BIN" >&2
+        exit 77
+    fi
     command -v curl >/dev/null || fail "curl is required"
     hk true || fail "SSH to the Exit host failed"
 
@@ -270,8 +279,11 @@ PYCLIENT
     expires_ms=$((now_ms + 604800000))
     candidate=$(jq -cn --arg owner "$owner_id" --argjson now "$now_ms" --argjson exp "$expires_ms" \
         --argjson rev "$local_revision" \
+        --arg rule srule_QRozWLZ_1hIYDQllIvh5DlSXPZLEOuV33g2QTsAtY_c \
         '{local_policy:{node_id:$owner,revision:$rev,issued_at_unix_ms:$now,expires_at_unix_ms:$exp,
-           network_scope:{kind:"all"},contribution_vetoes:[],exit_contribution:{},relay_limits:{},rules:[]},
+           network_scope:{kind:"all"},contribution_vetoes:[],exit_contribution:{},relay_limits:{},
+           rules:[{rule_id:$rule,effect:"allow",subjects:[{kind:"node",value:$owner}],
+                   resources:["relay","exit_grant"],actions:["use"],conditions:[]}]},
           network_acls:[]}')
     command=$(jq -cn --argjson cand "$candidate" --argjson rev "$policy_revision" \
         '{command:"apply_policy",payload:{expected_revision:$rev,candidate:$cand,network_ids:[],
@@ -451,6 +463,33 @@ SH
     local tun_name routing_status
     tun_name=$(jq -r --arg n "$NET" '.data.networks[]? | select(.name==$n) | .tun_name' "$WORK/evidence/client-snapshot.json" | head -1)
     [ -n "$tun_name" ] && [ "$tun_name" != null ] || fail "the client did not report a TUN device name"
+    info "granting the client local policy permission to use Relay and the Exit grant"
+    local client_node_id client_policy_rev client_local_rev client_candidate client_apply
+    ip netns exec "$NS" python3 "$WORK/ipc_client.py" "$client_sock" '{"command":"get_snapshot"}' \
+        >"$WORK/evidence/client-identity.json" 2>/dev/null || true
+    client_node_id=$(jq -r '.data.identity.node_id // empty' "$WORK/evidence/client-identity.json")
+    [ -n "$client_node_id" ] || fail "the client did not report its node identity"
+    ip netns exec "$NS" python3 "$WORK/ipc_client.py" "$client_sock" '{"command":"get_policy"}' \
+        >"$WORK/evidence/client-policy-before.json" 2>/dev/null || true
+    client_policy_rev=$(jq -r '.data.revision // 0' "$WORK/evidence/client-policy-before.json")
+    client_local_rev=$(( $(jq -r '.data.snapshot.local_policy.revision // 0' "$WORK/evidence/client-policy-before.json") + 1 ))
+    now_ms=$(date +%s%3N)
+    expires_ms=$((now_ms + 604800000))
+    client_candidate=$(jq -cn --arg owner "$client_node_id" --argjson now "$now_ms" --argjson exp "$expires_ms" \
+        --argjson rev "$client_local_rev" --arg rule srule_QRozWLZ_1hIYDQllIvh5DlSXPZLEOuV33g2QTsAtY_c \
+        '{local_policy:{node_id:$owner,revision:$rev,issued_at_unix_ms:$now,expires_at_unix_ms:$exp,
+           network_scope:{kind:"all"},contribution_vetoes:[],exit_contribution:{},relay_limits:{},
+           rules:[{rule_id:$rule,effect:"allow",subjects:[{kind:"node",value:$owner}],
+                   resources:["relay","exit_grant"],actions:["use"],conditions:[]}]},
+          network_acls:[]}')
+    client_apply=$(jq -cn --argjson cand "$client_candidate" --argjson rev "$client_policy_rev" \
+        '{command:"apply_policy",payload:{expected_revision:$rev,candidate:$cand,network_ids:[],
+           includes_local_policy:true,confirm_privilege_expansion:true}}')
+    ip netns exec "$NS" python3 "$WORK/ipc_client.py" "$client_sock" "$client_apply" \
+        >"$WORK/evidence/client-policy-apply.json" 2>"$WORK/evidence/client-policy-apply.err" \
+        || { cat "$WORK/evidence/client-policy-apply.err" >&2 || true; fail "the client local policy apply failed"; }
+    info "client policy revision now $(jq -r '.data.revision' "$WORK/evidence/client-policy-apply.json")"
+
     info "refreshing the owner candidate declaration before the session starts"
     command=$(jq -cn --arg n "$NET" --arg endpoint "10.7.53.243:$HS_PORT" \
         '{command:"publish_coordinator_candidate_declaration",payload:{network_name:$n,willingness:"willing",

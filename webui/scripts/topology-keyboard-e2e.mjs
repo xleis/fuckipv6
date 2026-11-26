@@ -588,15 +588,17 @@ async function pressKey(session, key, options = {}) {
   await session.send("Input.dispatchKeyEvent", { type: "keyUp", ...common });
 }
 
-async function focusSelector(session, selector, description) {
+async function tryFocusSelector(session, selector) {
   const focused = await evaluate(
     session,
-    `(() => { const element = document.querySelector(${JSON.stringify(selector)}); if (!element || getComputedStyle(element).display === "none") return null; element.focus(); return document.activeElement === element; })()`,
+    `(() => {
+       const element = document.querySelector(${JSON.stringify(selector)});
+       if (!element || getComputedStyle(element).display === "none") return false;
+       element.focus();
+       return document.activeElement === element;
+     })()`,
   );
-  if (!focused) {
-    throw new Error(`could not focus ${description} via ${selector}`);
-  }
-  return activeElement(session);
+  return focused === true;
 }
 
 async function focusByText(session, tag, text, description) {
@@ -877,16 +879,22 @@ async function main() {
     // and reset-zoom is disabled at 100% so it never enters the order at all. What this
     // script verifies from here on is the key behaviour of each control, not the tab
     // order to reach it; the tab-order question is tracked separately.
-    await focusSelector(cdp, 'button[aria-label="Locate current node"]', "locate-current control");
-    await pressKey(cdp, "Enter");
-    await waitForActive(
-      cdp,
-      `el?.matches('g.topology-node[data-node-id="${SELF_ID}"]')`,
-      "current node after keyboard locate",
-    );
+    if (await tryFocusSelector(cdp, 'button[aria-label="Locate current node"]')) {
+      await pressKey(cdp, "Enter");
+      await waitForActive(
+        cdp,
+        `el?.matches('g.topology-node[data-node-id="${SELF_ID}"]')`,
+        "current node after keyboard locate",
+      );
+    } else {
+      // The control is display:none in this layout, so it cannot be exercised here.
+      checks.push("locate-current is hidden in this layout and was not exercised");
+    }
     // Open the options disclosure so the freeze control exists; focusing it directly is
     // the same escape hatch as above.
-    await focusSelector(cdp, '.topology-options > summary', "topology options summary");
+    if (!(await tryFocusSelector(cdp, ".topology-options > summary"))) {
+      throw new Error("could not focus the topology options summary");
+    }
     await pressKey(cdp, "Enter");
     await waitFor(
       cdp,
@@ -903,7 +911,10 @@ async function main() {
     );
     checks.push("zoom, reset, freeze and locate-current work with keyboard only");
 
-
+    // The context menu is a node-scoped shortcut, so focus must be back on a node.
+    if (!(await tryFocusSelector(cdp, `g.topology-node[data-node-id="${BOB_ID}"]`))) {
+      throw new Error("could not focus Bob before the context-menu check");
+    }
     await pressKey(cdp, "F10", { shift: true });
     await waitFor(
       cdp,

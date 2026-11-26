@@ -4670,8 +4670,18 @@ Android 单测共 146 项通过。W16-01 仍缺真机验收，保持 `[ ]`。
 直接 `git rm` 该模块后 `cargo check` 报 `unresolved import fuckipv6_coordinator::webui`——
 `crates/client/src/webui/mod.rs` 与 `controller.rs` 复用了其中的 `NetworkConfigDto` 与
 `UpdateNetworkConfigRequest`。也就是说这个 3,704 行模块同时承担两种职责：**未挂载的路由**（可删）与
-**被客户端复用的 DTO**（不能删）。彻底移除的前置条件是把这 12 个 `pub struct/enum` 拆到独立模块，
-属于重构而不是清理，已回退并保持工作区可编译（`cargo check -p fuckipv6-client --lib` 零 error、`fmt` clean）。
+**被客户端复用的 DTO**（不能删）。彻底移除的前置条件是把复用的 `pub struct/enum` 拆到独立模块，属于重构而不是清理。
+
+**已完成（2026-11-26）**：新建 `crates/coordinator/src/dto.rs`，把客户端真正用到的五个类型
+（`NetworkConfigDto`、`UpdateNetworkConfigRequest`、`NetworkConfigApiResponse`、
+`BlacklistActionRequest`、`BlacklistActionResponse`）搬过去，`lib.rs` 增加 `pub mod dto;`，
+客户端的 `webui/mod.rs` 与 `controller.rs` 改从 `fuckipv6_coordinator::dto` 导入，然后
+`crates/coordinator/src/webui/`（3,704 行）整体删除。验证：`cargo check --workspace --all-targets
+--all-features` 零 error、`cargo clippy --workspace --all-targets --all-features -D warnings` 零 error、
+`cargo fmt --check` clean、`cargo test --workspace --all-features` **1566 + 172 + 11 + 10 全过、
+0 failed**。撤销治理的三个方法（`list_authorization_revocations`、
+`try_revoke_node_by_client_id`、`try_lift_revocation_by_client_id`）随控制台失去唯一调用者，用
+`#[allow(dead_code)]` 保留并注明：持久撤销是安全保证，等 CLI 或新 UI 接线后才能删。
   以下为上一轮的记录，保留以便对照。
 
   `crates/coordinator/src/webui/mod.rs` 仍是 3,704 行的独立控制台，

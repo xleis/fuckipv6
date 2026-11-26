@@ -4814,11 +4814,13 @@ DOM/契约断言，人工屏幕阅读器走查没有证据。
 加载；`client.ts` 对此已有失败关闭处理——worker 不可用时 `snapshotWorkerUnavailable` 置位并回退到
 主线程解析，所以离线场景不会因为缺 worker 而失效，只是失去并行解析。
 
-**补充（2026-11-21，构建哈希绑定 commit）**：`webui/vite.config.ts` 在构建时用
-`git rev-parse --short=12 HEAD` 注入 `__FUCKIPV6_BUILD_COMMIT__`（在非 checkout 环境退化为
-`unknown` 而不是让构建失败），`main.tsx` 把它写到 `document.documentElement.dataset.buildCommit`。
-`dist/assets/app.js` 因此自带 `buildCommit="2ec311aec69e"`，产物本身携带可追溯来源，不依赖 sidecar 文件；
-typecheck、lint、349 项单测与 i18n 检查在该改动后仍通过。
+**补充（2026-11-26，构建哈希绑定 commit 改为发布时注入）**：最初的做法是让 `vite.config.ts` 直接跑
+`git rev-parse` 并写进 `__FUCKIPV6_BUILD_COMMIT__`，结果是**仓库里的 `dist` 每提交一次就要重建一次**——
+产物绑定了 HEAD，而 HEAD 又因提交 dist 而前进，形成自指循环（实测两次提交后 `app.js` 又变脏）。
+现在改为从环境变量读取（`FUCKIPV6_BUILD_COMMIT`，缺省 `unknown`），本地两次 build 的 md5 完全一致；
+发布工作流在 `cargo build` **之前**先 `npm ci` 并用 `${GITHUB_SHA}` 重建 webui，所以**发布产物仍带
+真实 commit**，而检入的 `dist` 不再随 HEAD 抖动。`main.tsx` 依旧把它写到
+`document.documentElement.dataset.buildCommit`，产物自带可追溯来源。
 
 ### W18-04 Schema 与兼容闸门 `[x]`
 

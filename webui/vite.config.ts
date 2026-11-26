@@ -1,20 +1,14 @@
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
-import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 
-// The release gate asks the build artifact to be traceable to a commit. `git` is
-// present in CI and in a checkout, but a source tarball may not carry it, so the
-// value degrades to an explicit marker instead of failing the build.
+// The release gate asks the build artifact to be traceable to a commit. The value
+// comes from the environment so a local rebuild stays byte-identical between
+// commits: the checked-in bundle must not change just because HEAD moved.
 function buildCommit(): string {
-  try {
-    return execFileSync("git", ["rev-parse", "--short=12", "HEAD"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-  } catch {
-    return "unknown";
-  }
+  const fromEnv = process.env.FUCKIPV6_BUILD_COMMIT?.trim();
+  if (fromEnv) return fromEnv.slice(0, 12);
+  return "unknown";
 }
 
 const cleanRemoveScrollBarCss = {

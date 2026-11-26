@@ -49,6 +49,13 @@ jobs:
             echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Build the embedded WebUI with the release commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --prefix webui
+          FUCKIPV6_BUILD_COMMIT="${GITHUB_SHA}" npm run build --prefix webui
+
       - name: Build
         run: cargo build --release --workspace
 
@@ -154,6 +161,13 @@ jobs:
             echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Build the embedded WebUI with the release commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --prefix webui
+          FUCKIPV6_BUILD_COMMIT="${GITHUB_SHA}" npm run build --prefix webui
+
       - name: Build
         run: cargo build --release --workspace --target x86_64-pc-windows-gnu
 
@@ -252,6 +266,13 @@ jobs:
           else
             echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Build the embedded WebUI with the release commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --prefix webui
+          FUCKIPV6_BUILD_COMMIT="${GITHUB_SHA}" npm run build --prefix webui
 
       - name: Build
         run: cargo build --release --workspace --target ${{ matrix.target }}

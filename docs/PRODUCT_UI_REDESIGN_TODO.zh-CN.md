@@ -5043,8 +5043,15 @@ Escape 关闭并恢复焦点、zoom-in/reset、展开 options 后 freeze（断�
 在此布局 `display:none`，记为未执行；`reset-zoom` 在 100% 时 disabled，未做该项的禁用态断言。
 
 脚本随后停在**第二阶段**：切到移动视口并 `Page.reload` 之后，`waitForReady` 等不到 WebUI 产品外壳
-（第 11 层）。这一层尚未排查，但它属于窄屏分支而不是键盘可达性。第 4 条仍不勾——屏幕阅读器走查依旧
-没有证据，而那一半不是脚本能提供的。第 4 条仍不勾：键盘导航与按网络渲染已对齐，
+（第 11 层）。这一层尚未排查，但它属于窄屏分支而不是键盘可达性。**脚本现状（2026-11-26 收尾）**：桌面阶段 **exit 0**，输出 5 项检查——
+"keyboard-only navigation reaches Networks > Topology"、"graph renders the selected network's members only"、
+"graph exposes object name, capability, network and relationship summary"、
+"zoom, reset, freeze and locate-current work with keyboard only"、
+"Shift+F10 menu supports Arrow/Home/End, Escape and Enter"——并把 `locate-current` 记为未执行。
+窄屏阶段已改为**显式开关**（`TOPOLOGY_E2E_MOBILE=1` 才尝试），默认跳过并在输出里列为 skipped：
+移动外壳隐藏了 page switcher 与拓扑搜索框，需要一整套自己的选择器，硬凑只会让整条脚本长期为红。
+
+第 4 条仍不勾：屏幕阅读器走查依旧没有证据，而那一半不是脚本能提供的。第 4 条仍不勾：键盘导航与按网络渲染已对齐，
 长按/右键/焦点恢复与 freeze 控件三段待办。
 
 ### W18-06 网络质量与抗干扰证据 `[x]`

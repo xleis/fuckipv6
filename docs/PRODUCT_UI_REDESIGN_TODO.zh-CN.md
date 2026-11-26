@@ -5268,6 +5268,17 @@ runtime dir），不是环境变量，因此 unset 变量并不能伪造无头�
 
 ### W18-09 平台发布门禁 `[ ]`
 
+**补充（2026-11-26，平台支持表与排除判据）**：第 8 条要求"不支持平台/架构明确排除"，此前平台支持表**尚不存在**。
+现在新增 `docs/PLATFORM_SUPPORT.zh-CN.md` 与 `scripts/check-platform-matrix.py`（+8 项自测）：不随发布的架构
+（`aarch64-unknown-linux-gnu`、`x86_64-unknown-linux-musl`、WSL、iOS）逐行写明**排除理由**；随发布的四个 target
+（`x86_64-unknown-linux-gnu`、`x86_64-pc-windows-gnu`、`x86_64-apple-darwin`、`aarch64-apple-darwin`）与 Android APK
+必须分类为 `shipped` 且证据可解析。证据格式固定为 `path:<存在文件>` / `doc:<存在文档>#<章节>` / `unsupported:<理由≥20字>` /
+`unverified:<缺什么≥20字>`，空单元格、含糊理由、`path` 指向不存在的文件都会失败；工作流里新出现而未入表的 target 也会失败。
+已接入 `release-gate.py` 的必选检查 `platform-matrix` 与 `verify.yml`。
+
+因此**第 8 条可以勾选**：平台支持表存在、每个排除项都有理由、每个产出项都有可解析证据，且由脚本持续守住。
+第 2、3、4、6、7 条仍不勾（macOS/Windows 实机、Android 真机、服务托管与休眠切网、三端可访问性证据不齐）。
+
 - [x] Linux 实机报告；
 - [ ] macOS 实机报告；
 - [ ] Windows 实机报告；
@@ -5275,7 +5286,7 @@ runtime dir），不是环境变量，因此 unset 变量并不能伪造无头�
 - [ ] 安装/升级/回滚/卸载；
 - [ ] 服务托管和休眠/切网；
 - [ ] GPUI/WebUI/Compose 可访问性；
-- [ ] 不支持平台/架构明确排除。
+- [x] 不支持平台/架构明确排除（平台支持表 `docs/PLATFORM_SUPPORT.zh-CN.md` 由 `scripts/check-platform-matrix.py` 校验）。
 
 **验收**：平台支持表每项都有证据链接或明确“不支持”，不允许空白承诺。
 

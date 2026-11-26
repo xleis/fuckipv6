@@ -60,6 +60,7 @@ COMMON_REQUIRED_CHECKS = (
     "helper-tests",
     "single-binary",
     "ignored-tests",
+    "platform-matrix",
     "docs",
     "check",
     "test",
@@ -378,6 +379,7 @@ def helper_test_arguments() -> list[str]:
         "scripts/test_check_ignored_tests.py",
         "scripts/test_release_notes.py",
         "scripts/test_fault_injection_suite.py",
+        "scripts/test_check_platform_matrix.py",
         "-v",
     ]
 
@@ -656,6 +658,19 @@ def run_gate(args: argparse.Namespace) -> int:
                 str(artifact_root / "ignored-tests.json"),
             ),
             artifact_root / "ignored-tests.log",
+            env=env,
+        )
+    )
+    checks.append(
+        run_logged(
+            "platform-matrix",
+            (
+                sys.executable,
+                "scripts/check-platform-matrix.py",
+                "--report",
+                str(artifact_root / "platform-matrix.json"),
+            ),
+            artifact_root / "platform-matrix.log",
             env=env,
         )
     )

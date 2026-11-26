@@ -437,6 +437,11 @@ jobs:
             ~/.gradle/wrapper
           key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
 
+      - name: Check platform support matrix
+        run: |
+          python3 -m unittest scripts/test_check_platform_matrix.py -v
+          python3 scripts/check-platform-matrix.py
+
       - name: Check ignored tests
         run: |
           python3 -m unittest scripts/test_check_ignored_tests.py -v

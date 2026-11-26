@@ -5288,7 +5288,7 @@ artifact 上传，找不到 APK 时直接失败。两端资产哈希因此都有
 与 `scripts/release-notes.py`——后者把版本号、commit、工具链填入模板，并把 CHANGELOG 里该版本的段落
 放进"能力"节；**只要模板里还有未填写的节就直接失败**（`--allow-placeholder-migration` 只用于出草稿），
 避免发布说明停留在"看起来写了"。三个 package job 在打包后生成 `RELEASE_NOTES.md` 进分发目录。
-本条仍不勾：机制有了，但首次真实发布时"限制"与"迁移"两节仍需人填写，当前没有任何一份填写完成的说明。
+**2026-11-26 收口**：`docs/release-notes/0.4.0.md` 已按三节写入真实内容，`release-notes.py` 改为优先读取该版本文件；在冻结工作区对 commit `dd42c44` 重跑 Linux 门禁仍为 `status: passed`、`release_ready: true`（18 项全 passed，含新增的 `ignored-tests` 与 `release-notes` helper 测试），因此本条勾选。
 
 ### W18-11 发布阻断逐项签核 `[ ]`
 

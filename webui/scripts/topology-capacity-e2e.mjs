@@ -1164,7 +1164,9 @@ async function main() {
       cdp,
       `(() => {
         const button = [...document.querySelectorAll(".topology-view-switch button")].find(
-          (element) => element.textContent?.trim() === "Graph",
+          (element) =>
+            element.getAttribute("aria-label") === "Graph" ||
+            element.textContent?.trim() === "Graph",
         );
         button?.click();
         return Boolean(button);

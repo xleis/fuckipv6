@@ -4670,6 +4670,15 @@ Android 单测共 146 项通过。W16-01 仍缺真机验收，保持 `[ ]`。
 
 ### W18-02 Rust 质量门禁 `[x]`
 
+**结论（2026-11-26，冻结工作区实跑）：Linux 门禁整绿**。`git worktree add --detach /tmp/gate-frozen e1e1777` 后在**冻结副本**里跑
+`python3 scripts/release-gate.py run --platform linux --toolchain stable --require-clean --benchmark none`，结果 `status: passed`、
+`release_ready: true`，**18 项检查全部 passed**（`format`、`helper-tests`、`single-binary`、`ignored-tests`、`docs`、`check`、`test`、
+`lifecycle-cleanup*` 四项、`clippy`、`release-build`、musl 与 windows-gnu 交叉检查、`stable-source`、`clean-worktree`）。
+
+为什么要在冻结副本里跑：在主工作区跑时 `stable-source` 反复为红，因为并发会话在这台机器上持续提交，门禁执行期间 HEAD 会被推进；
+这不是代码问题而是并发事实。冻结副本的 HEAD 不受影响，因此能给出可复现的整绿判定。本轮同时修掉了 `gpui/view.rs` 里 4 处
+`needless_borrows_for_generic_args`（这些行当时已被提交，属共享代码而非他人 WIP），并把新增的 `ignored-tests` 检查纳入门禁必选项。
+
 **补充（2026-11-21，第二次本地 release-gate linux 实跑）**：修掉 musl 交叉编译与 `UiSurfaceKind::Gpui` 死代码告警后重跑，
 `python3 scripts/release-gate.py run --platform linux --toolchain stable --allow-dirty --benchmark none` 的结果只剩一项红：
 

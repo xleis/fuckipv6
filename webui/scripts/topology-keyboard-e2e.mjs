@@ -811,6 +811,33 @@ async function main() {
       `document.querySelector('[data-testid="topology-zoom-status"]')?.textContent?.trim() === "100%"`,
       "zoom status reset to 100 percent",
     );
+    // Arrow handling is scoped to the graph, so focus must be inside it first.
+    await tabTo(
+      cdp,
+      `el?.matches('g.topology-node[data-node-id="${SELF_ID}"]')`,
+      "self node in the graph",
+    );
+    await pressKey(cdp, "ArrowRight");
+    await waitForActive(
+      cdp,
+      `el?.matches('g.topology-node[data-node-id="${BOB_ID}"]')`,
+      "next graph node after ArrowRight",
+    );
+    await pressKey(cdp, "Enter");
+    await waitFor(
+      cdp,
+      `document.querySelector('[data-testid="topology-node-detail"] h2')?.textContent?.trim() === "Bob"`,
+      "Bob node detail after Enter",
+    );
+    await pressKey(cdp, " ");
+    await waitFor(
+      cdp,
+      `document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.getAttribute("data-selected") === "true"`,
+      "Bob selection after Space",
+    );
+    checks.push("graph roving focus, Enter open and Space selection work by keyboard");
+    // Two-pass sweep: locate-current is disabled until a node has a focus target, and a
+    // disabled button is not in the tab order, so node selection must come first.
     await tabTo(
       cdp,
       `el?.matches('button[aria-label="Locate current node"]')`,
@@ -822,9 +849,6 @@ async function main() {
       `el?.matches('g.topology-node[data-node-id="${SELF_ID}"]')`,
       "current node after keyboard locate",
     );
-    // locate-current is the last control before the disclosure in DOM order, so the
-    // keyboard walk must take it first and only then open the options panel: tabbing
-    // forward from inside a panel can never reach back to an earlier element.
     // The layout controls live inside a collapsed <details class="topology-options">,
     // so the disclosure must be opened with the keyboard first.
     await tabTo(
@@ -853,25 +877,6 @@ async function main() {
     );
     checks.push("zoom, reset, freeze and locate-current work with keyboard only");
 
-    await pressKey(cdp, "ArrowRight");
-    await waitForActive(
-      cdp,
-      `el?.matches('g.topology-node[data-node-id="${BOB_ID}"]')`,
-      "next graph node after ArrowRight",
-    );
-    await pressKey(cdp, "Enter");
-    await waitFor(
-      cdp,
-      `document.querySelector('[data-testid="topology-node-detail"] h2')?.textContent?.trim() === "Bob"`,
-      "Bob node detail after Enter",
-    );
-    await pressKey(cdp, " ");
-    await waitFor(
-      cdp,
-      `document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.getAttribute("data-selected") === "true"`,
-      "Bob selection after Space",
-    );
-    checks.push("graph roving focus, Enter open and Space selection work by keyboard");
 
     await pressKey(cdp, "F10", { shift: true });
     await waitFor(

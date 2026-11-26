@@ -5155,6 +5155,19 @@ workspace 与 fuzz 两个目标都输出 `advisories ok, bans ok, licenses ok, s
 
 ### W18-08 生命周期与故障恢复门禁 `[ ]`
 
+**补充（2026-11-26，统一证据套件）**：新增 `scripts/fault-injection-suite.py`（+7 项自测），把散落的注入脚本收成**一次可复现的运行**：
+它按套件表执行 `scripts/test-*-netns.sh`、无特权多进程演练与 rootless 包装变体，逐项记录 `passed / skipped / failed / timeout`，
+把 `skipped` 连同**该套件自己的原因**写进报告，并可选 `--require-full` 把跳过升级为阻断。产物：`target/fault-injection/report.{json,md}`
+（Markdown 表格逐行给出套件、域、状态、耗时与说明），已接入 `verify.yml` 的 `linux` job 并上传 artifact。
+
+本机实测（非 root）：**passed=6、skipped=6、failed=0**。真实执行的是 `w12-interference`（延迟/丢包/阻断/MTU/DNS 投毒矩阵，159s）、
+`w12-exit-local`（57s）、`w12-p2p-invite`（30s）、`w13-relay-failure`（171s）、`w14-admin-recovery-drill`（无特权多进程演练，1.2s）、
+`w14-coordinator-fault`（65s）。跳过的是四个需要真实 root 的 netns 套件与一个需要 release 构建的 File 套件；`w14-admin-recovery-netns`
+**不再**被 rootless 包装强行执行——第一次跑时它在用户命名空间里报 `no_ack_while_partitioned` 失败，原因是该套件的 nftables 分区在
+rootless 拓扑下并不真正生效（`partition_enforced` 只证明规则命令执行成功），属于套件前提而非产品缺陷；现在它被正确归为 root-only。
+
+因此第 8 条**仍不勾选**：套件与报告已经统一，但 root-required 的四个套件与真机项仍需在具备权限的环境执行，`--require-full` 才是"全套"的判据。
+
 - [x] 关 UI 不断网；
 - [x] control 崩溃 node 继续；
 - [x] stop node 不断 control/WebUI；

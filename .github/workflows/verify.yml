@@ -314,6 +314,20 @@ jobs:
           --benchmark quick
           --report target/release-gate/linux.json
 
+      - name: Run the fault-injection suites
+        run: >-
+          python3 scripts/fault-injection-suite.py
+          --report target/fault-injection/report.json
+
+      - name: Upload fault-injection evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fault-injection
+          path: target/fault-injection
+          if-no-files-found: warn
+
+
       - name: Upload Linux report
         if: always()
         uses: actions/upload-artifact@v4

@@ -5275,6 +5275,20 @@ Android 前台服务未实现）；第 5 条的 TUN 残留问题仍有 2026-11-1
 
 这张表本身仍不足以勾第 8 条："长时"一行已于 2026-11-26 移出验收范围，不能充当"全套"证据。
 
+**工具化执行结果（2026-11-26，`scripts/fault-injection-suite.py`）**：那张表现在有可执行的对应物——12 个
+suite 由同一个 runner 驱动，逐个执行并记录自己的跳过理由，不允许"空着就算过"。本机实跑结果
+（`/tmp/fault-report.json`）：
+
+| 结果 | suite |
+|---|---|
+| **passed（6）** | `w12-interference` 201.4s、`w13-relay-failure` 375.2s、`w14-coordinator-fault` 138.9s、`w12-exit-local` 60.7s、`w12-p2p-invite` 30.7s、`w14-admin-recovery-drill` 15.1s |
+| **skipped（6，均带理由）** | `lifecycle-cleanup`、`recovery`、`traffic-routing`、`exit-node`、`w14-admin-recovery-netns` —— "root is required and the runner is not root"（本机 sudo 被 `no_new_privs` 阻断）；`w15-file` —— "requires a release build: run `cargo build --release` first" |
+| **failed / timeout（0）** | —— |
+
+汇总为 `passed=6, skipped=6, failed=0, timeout=0`，脚本已接入 `verify.yml`（CI runner 有 root，五个
+"需 root"的 suite 在那里才真正执行）。第 8 条我仍**不勾**：按上一条的判断，这里的"全套"取决于清单范围，
+而六项被跳过的 suite 在本机没有结果——它们有理由，但没有证据。
+
 **补充（2026-11-21，先误判后更正）**：在有桌面会话的主机上这些用例按策略跳过
 （`skip_webui_lifetime_test_on_desktop`）。本轮先用
 `env -u DISPLAY -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE -u XDG_CURRENT_DESKTOP -u DESKTOP_SESSION`

@@ -5115,8 +5115,13 @@ nav-footer 依赖）与页切换器（同 tablist 依赖）已改，但仍停在
 说明无头 Chrome 下的虚拟化滚动时序本身不稳定。因此这条脚本**不接入 CI**：把一条 flaky 用例变成门禁
 只会制造噪音，它不是"还没修好"，而是"在无头环境里不能稳定判定"。
 
-第 4 条仍不勾：屏幕阅读器走查依旧没有证据，而那一半不是脚本能提供的。第 4 条仍不勾：键盘导航与按网络渲染已对齐，
-长按/右键/焦点恢复与 freeze 控件三段待办。
+**补充（2026-11-26，成员治理与容量两条拓扑 E2E 恢复全绿并接入 CI）**：
+
+- `webui/scripts/topology-member-e2e.mjs`（commit `93b50ac`）已完整对齐当前外壳契约（`<details class="page-switcher">`、`action-workspace` 命令菜单、W14 `coordinator_candidates` 可写治理夹具、按选中网络渲染的拓扑图、`<details class="topology-governance-disclosure">` / `.topology-network-chips` 切网、`<details class="topology-options">` 搜索面板以及详情抽屉 `Escape` 关闭与焦点恢复）。在 `xvfb-run -a node webui/scripts/topology-member-e2e.mjs --skip-build` 下 **17/17 项全部通过**，覆盖纯键盘导航、一次性邀请创建、多网络（Home/Studio）独立成员状态、**窄屏真实触摸长按菜单**、**真实指针右键菜单**、`Shift+F10` 审批及审计编号、组策略与降级刷新、6 项影响预检移除、Studio 成员保留、Overview 活动审计编号追踪、120 节点增量刷新与断线重连权威重同步；`npm run lint --prefix webui` 零告警通过；
+- commit `7480cf5` 已将 `xvfb-run -a node webui/scripts/topology-member-e2e.mjs --skip-build` 及拓扑 E2E 报告上传（`target/topology-keyboard-e2e/report.json`、`target/topology-member-e2e/report.json`）接入 `.github/workflows/verify.yml` 的 `visual-regression` job；
+- `webui/scripts/topology-capacity-e2e.mjs`（commit `94fad70`）修复切回 Graph 视图图标按钮 `aria-label` 匹配后，在 `xvfb-run -a node webui/scripts/topology-capacity-e2e.mjs --skip-build` 下 **11/11 项全部通过**（含 1,000 节点 / 5,000 连接、500 事件合并、虚拟列表 `End` 键跳转、断线重连同步、无 >50ms Long Task、JS Heap <256MB）；因共享 CI runner 上 50ms Long Task 时序预算对 CPU 抖动敏感，继续作为本机可复核容量基线而不加入 CI 门禁。
+
+第 4 条仍不勾：键盘、右键与真实触摸长按 E2E 现已全部通过并接入 CI，但屏幕阅读器人工走查仍无证据，因此不勾选。
 
 ### W18-06 网络质量与抗干扰证据 `[x]`
 

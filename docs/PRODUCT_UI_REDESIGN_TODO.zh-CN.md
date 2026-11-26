@@ -4619,6 +4619,21 @@ Android 单测共 146 项通过。W16-01 仍缺真机验收，保持 `[ ]`。
 
 ### W18-01 功能闭环审计 `[ ]`
 
+**补充（2026-11-26，Android↔桌面能力矩阵）**：第 6 条此前只有"Android 有 14 页"这种说法，没有逐命令对照。现在由
+`scripts/android-capability-matrix.py`（+6 项自测）生成 `docs/ANDROID_CAPABILITY_MATRIX.zh-CN.md`：
+
+- 从共享 manifest 取 **77 个可见动作**，从 Android 主源码用**严格模式**提取命令值（只认 `.put("command", "…")`、
+  `"command": "…"`、`command = "…"` 三种写法；第一版把所有带引号的 snake_case 都当命令，立刻产生 314 条假"漂移"）；
+- 结果：**Android 已挂载 18 个动作、桌面专属 59 个**；挂载项集中在成员/加入申请/邀请/管理员恢复/路由/Exit/Relay/快照刷新；
+- `mounted` 必须在 `bridge/` 或 `ui/` 里真的发送该命令——注释或测试提到不算；
+- **反向漂移**也检查：Android 发送了 manifest 里不存在的命令即失败；
+- **manifest 之外**的 Android 能力单列一张表（黑名单 3 个命令、File REST 3 个端点、SSE、VpnService），逐项要求源码里存在对应标识，
+  否则失败；`get_snapshot` 通过 REST `/api/v1/snapshot` 实现的差异被显式记为"等价实现"，而不是假装 Android 没有刷新能力；
+- `--check` 要求磁盘表与两份权威同步。已接入 release gate 必选检查 `android-capability` 与 `verify.yml`。
+
+本条据此勾选：能力矩阵存在、两个方向都可核对、既有"桌面有而手机没有"的诚实差异，也不埋掉"手机有而 manifest 没写"的部分。
+W18-01 剩余两条（遍历全部控件、Coordinator/Relay/Exit/File 全能力）需要人工走查与真机能力快照，不在本轮范围。
+
 **补充（2026-11-26，功能—证据映射表）**：第 8 条要求的映射表此前不存在。现在由 `scripts/feature-evidence-matrix.py`
 （+6 项自测）从 `contracts/typescript/fixtures/node-manifest.json`（随包发布的权威 manifest）生成
 `docs/FEATURE_EVIDENCE.zh-CN.md`：**77 个可见动作**，逐行给出页面、动作、命令、权限、审计策略、后端状态与证据文件；
@@ -4633,7 +4648,7 @@ Android 单测共 146 项通过。W16-01 仍缺真机验收，保持 `[ ]`。
 - [x] 删除所有只返回 `Unavailable`、静态成功或假数据的入口；
 - [ ] 核对 Coordinator/Relay/Exit/File 全能力；
 - [x] 核对多网络、发现、审批、治理和隐私；
-- [ ] 核对 Android 与桌面能力矩阵；
+- [x] 核对 Android 与桌面能力矩阵（`docs/ANDROID_CAPABILITY_MATRIX.zh-CN.md` 由 `scripts/android-capability-matrix.py` 生成：77 个可见动作逐行对比「桌面 available/blocked」与「Android mounted/desktop-only」，`mounted` 要求 bridge/ui 源码里真的发送该命令；另列 8 项 manifest 之外的 Android 能力（黑名单、File REST、SSE、VpnService）与 `get_snapshot` 的 REST 等价实现）；
 - [x] 核对旧双 WebUI 已移除或被禁用；
 - [x] 形成功能—证据映射表（`docs/FEATURE_EVIDENCE.zh-CN.md` 由 `scripts/feature-evidence-matrix.py` 从共享 manifest 生成，77 个可见动作逐行给页面/命令/权限/审计策略/后端状态/证据；证据列必须指向**真实提到该命令**的源文件，缺失或对不上直接失败，`--check` 还要求磁盘上的表与 manifest 同步）。
 

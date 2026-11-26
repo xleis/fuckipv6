@@ -437,6 +437,11 @@ jobs:
             ~/.gradle/wrapper
           key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
 
+      - name: Check the Android capability matrix
+        run: |
+          python3 -m unittest scripts/test_android_capability_matrix.py -v
+          python3 scripts/android-capability-matrix.py --check
+
       - name: Check the feature evidence matrix
         run: |
           python3 -m unittest scripts/test_feature_evidence_matrix.py -v

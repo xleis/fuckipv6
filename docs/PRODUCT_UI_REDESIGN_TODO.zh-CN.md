@@ -3064,8 +3064,15 @@ IPv4 `/32`、IPv6 `/128` TUN 路由在传输前后保持存在，未创建 IPv4 
 - [x] 测试结束自动清理 TUN、路由、DNS 和子进程（矩阵 cleanup 用例 + Exit 验收的 `resolv.conf`/`nsswitch.conf` 逐字节恢复）；
 - [x] 失败能恢复，不能留下需手工 kill 的状态（blackout/route-switch/node-freeze 自动回到 healthy；镜像 Exit 会话记录 `fail_closed → protected`；TERM 后无残留进程）；
 - [x] 记录宿主生命周期事故并形成操作红线；
-- [ ] 关闭 TUN 残留：用当前构建重跑停止路径并定性 `persist on` 残留是否仍存在；
-- [ ] 关闭重复生命周期所有者：同一 runtime 目录下不应允许两个 control 并存；
+- [x] 关闭 TUN 残留：用当前构建重跑停止路径并定性 `persist on` 残留（2026-11-26，隔离 netns 实测）：
+  当前构建经 `ip tuntap add` 创建，`ip -d link` 显示 `persist on`（源码已注明该行为）；`stop_networks` 会删除
+  TUN 与虚拟路由；对 node 进程 `SIGKILL` 后 TUN 按预期残留，但控制面在 1 秒内重启 node 并记录
+  `检测到崩溃残留的 TUN 网卡，正在安全接管并重建` / `已替换崩溃残留的 TUN 网卡`，无需手工 `ip link del`；
+  对 launcher（CLI/WebUI）`TERM` 不停止数据面，正确入口是 `down`/`stop_networks` 或停止 control，
+  孤儿命名空间需操作者清理（事故红线已写明）。
+- [x] 关闭重复生命周期所有者（2026-11-26，隔离 netns 实测）：在同一 runtime/config 目录启动第二个
+  `host` 时被拒绝（`节点拒绝了命令 (Conflict): 网络 [w12dup] 已存在或正在运行`），`control.lock`/`node.lock`
+  仍只记录单一 control/node；2026-11-16 香港主机上的双 control 残留来自 2026-11-12 构建，当前构建未能复现。
 - [x] 抗干扰报告只声明特定环境和时间段的结果（矩阵与 Exit/镜像验收均写明拓扑、时间窗与证据目录）；
 
 **2026-11-13 生命周期事故**：在活动宿主实例上执行非原子 `down -> kill -> systemd-run/up`，替代实例因非

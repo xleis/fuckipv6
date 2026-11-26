@@ -31,6 +31,8 @@ class Suite:
         script: str | None = None,
         *,
         rootless_script: str | None = None,
+        cargo_test: tuple[str, str, str] | None = None,
+        requires_release_build: bool = False,
         root_required: bool = False,
         timeout_seconds: int = 600,
     ) -> None:
@@ -39,10 +41,15 @@ class Suite:
         self.description = description
         self.script = script
         self.rootless_script = rootless_script
+        self.cargo_test = cargo_test
+        self.requires_release_build = requires_release_build
         self.root_required = root_required
         self.timeout_seconds = timeout_seconds
 
     def command(self, is_root: bool) -> list[str] | None:
+        if self.cargo_test:
+            package, target, test_name = self.cargo_test
+            return ["cargo", "test", "-p", package, "--test", target, test_name, "--", "--exact"]
         if self.rootless_script:
             return ["bash", "scripts/w12-rootless-netns.sh", "bash", self.rootless_script]
         if self.root_required and not is_root:
@@ -114,10 +121,22 @@ SUITES: tuple[Suite, ...] = (
         timeout_seconds=1800,
     ),
     Suite(
-        "w14-admin-recovery",
+        "w14-admin-recovery-netns",
         "Coordinator",
-        "管理员恢复接管（分区变体）",
-        rootless_script="scripts/test-w14-admin-recovery-netns.sh",
+        "管理员恢复接管（nftables 分区变体，需真实 root 以便分区真正生效）",
+        script="scripts/test-w14-admin-recovery-netns.sh",
+        root_required=True,
+        timeout_seconds=1800,
+    ),
+    Suite(
+        "w14-admin-recovery-drill",
+        "Coordinator",
+        "管理员恢复多进程演练（离线 Trustee + 两次 SIGKILL 重启）",
+        cargo_test=(
+            "fuckipv6-coordinator",
+            "w14_admin_recovery_multinode",
+            "w14_admin_recovery_multinode_offline_trustee_drill",
+        ),
         timeout_seconds=1800,
     ),
     Suite(
@@ -130,8 +149,9 @@ SUITES: tuple[Suite, ...] = (
     Suite(
         "w15-file",
         "File",
-        "上传下载、续传与撤权中断",
+        "上传下载、续传与撤权中断（需要先有 release 构建）",
         rootless_script="scripts/test-w15-file-netns.sh",
+        requires_release_build=True,
         timeout_seconds=1800,
     ),
 )
@@ -154,6 +174,15 @@ def run_suite(suite: Suite, *, is_root: bool, timeout_override: int | None) -> d
         "domain": suite.domain,
         "description": suite.description,
     }
+    if suite.requires_release_build and not (PROJECT_ROOT / "target" / "release" / "deps").is_dir():
+        return {
+            **base,
+            "status": "skipped",
+            "reason": "requires a release build: run `cargo build --release` first",
+            "duration_seconds": 0.0,
+            "exit_code": None,
+            "tail": "",
+        }
     if command is None:
         return {
             **base,

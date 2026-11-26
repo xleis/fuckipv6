@@ -73,8 +73,12 @@ class FaultInjectionSuiteTest(unittest.TestCase):
         self.assertIn("root is required", markdown)
         self.assertIn("passed=1", markdown)
 
-    def test_every_declared_suite_points_at_a_real_script(self) -> None:
+    def test_every_declared_suite_points_at_a_real_script_or_cargo_test(self) -> None:
         for suite in SUITE.SUITES:
+            if suite.cargo_test:
+                package, target, test_name = suite.cargo_test
+                self.assertTrue(package and target and test_name, suite.name)
+                continue
             script = suite.script or suite.rootless_script
             self.assertIsNotNone(script, suite.name)
             path = SUITE.PROJECT_ROOT / str(script)

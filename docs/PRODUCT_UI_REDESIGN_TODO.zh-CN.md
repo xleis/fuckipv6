@@ -5057,8 +5057,11 @@ webui 依赖，不需要新增 job。
 
 另外两条拓扑脚本**同样陈旧**，本轮只修了已知的两层：`topology-capacity-e2e.mjs` 的就绪判定（同
 nav-footer 依赖）与页切换器（同 tablist 依赖）已改，但仍停在自己的模块查找上，因此**没有接入 CI**；
-`topology-member-e2e.mjs` 连就绪之前的 `waitFor` 都还在等 "Networks page tab"。三条脚本里只有键盘这条
-达到可门禁状态。
+`topology-capacity-e2e.mjs` 本轮又修了四层（窄屏下的抽屉触发器、图标化后的视图切换 `aria-label`、
+图预算提示与列表行数改为按**选中网络**而不是 fixture 的 1,000 计数、列表虚拟化阈值），现在跑到
+"按 End 跳到最后一个虚拟行"就停了——诊断显示 `activeTag=body`，焦点根本不在行上，属于和键盘脚本同类的
+焦点归属问题。`topology-member-e2e.mjs` 连就绪之前的 `waitFor` 都还在等 "Networks page tab"。
+三条脚本里只有键盘这条达到可门禁状态，另外两条**都没有接入 CI**。
 
 第 4 条仍不勾：屏幕阅读器走查依旧没有证据，而那一半不是脚本能提供的。第 4 条仍不勾：键盘导航与按网络渲染已对齐，
 长按/右键/焦点恢复与 freeze 控件三段待办。

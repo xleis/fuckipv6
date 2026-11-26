@@ -811,6 +811,19 @@ async function main() {
       `document.querySelector('[data-testid="topology-zoom-status"]')?.textContent?.trim() === "100%"`,
       "zoom status reset to 100 percent",
     );
+    // The layout controls live inside a collapsed <details class="topology-options">,
+    // so the disclosure must be opened with the keyboard first.
+    await tabTo(
+      cdp,
+      `el?.tagName === "SUMMARY" && Boolean(el.closest(".topology-options"))`,
+      "topology options summary",
+    );
+    await pressKey(cdp, "Enter");
+    await waitFor(
+      cdp,
+      `document.querySelector(".topology-options")?.hasAttribute("open") === true`,
+      "open topology options",
+    );
     // The freeze control carries its label as visible text rather than aria-label,
     // so it has to be matched by name instead of by attribute.
     await tabTo(

@@ -4892,7 +4892,7 @@ traffic failure kind、traffic protection state）。至此 **38/43** 个集合�
 - [ ] 加载、错误、无权限、不支持、降级和陈旧状态；
 - [ ] 视觉差异只允许平台必要项；
 - [ ] 有变化时人工审核而非自动接受；
-- [ ] 视觉证据与 commit 绑定。
+- [x] 视觉证据与 commit 绑定。
 
 **验收**：UI 像素级目标通过可复核基线验证，不存在功能分叉。
 
@@ -4907,6 +4907,12 @@ traffic failure kind、traffic protection state）。至此 **38/43** 个集合�
   - 几何：`activity` 区块 WebUI 高 195.69 px vs GPUI 99.5 px（差 96.19 px，容差 1.5），
     `activity_empty` 34 vs 130（差 96），`activity` 与 `activity_heading` 的 `y` 同时偏 6.28 px；
   - 像素：`rmse=24.353` 超过阈值 22（`mae=5.514`、`>16` 比例 0.0302、`>32` 比例 0.0273 仍在阈值内）。
+**补充（2026-11-26，视觉报告绑定 commit）**：`visual-regression.mjs` 的报告新增 `source` 字段，
+从仓库根解析 `git rev-parse HEAD` 与 `git status --porcelain`（脚本自身以 `webui` 为 cwd，所以必须显式
+传 `cwd: REPO_ROOT`，这一点调试时暴露过）。实测报告现在带
+`"source": {"commit": "22bd68dd2e29…", "dirty": true}`，dirty 只记录不阻断——CI 的 checkout 是干净的，
+而本地诊断运行允许脏树。第 8 条据此勾选。
+
 - 结论：这不是随机噪声，而是活动区在两端的高度差接近 96 px 的整块布局分叉，属于当前工作区里
   WebUI 活动面重构与 GPUI 投影尚未对齐的中间态。拓扑页的像素级一致性说明比对工具本身可用，
   因此该差异不能记为"平台必要项"。第 2、3 两条因此都还不能勾：拓扑页只覆盖了单网络场景，

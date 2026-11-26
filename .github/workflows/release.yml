@@ -120,8 +120,7 @@ jobs:
           version="${{ steps.version.outputs.version }}"
           package="fuckipv6-linux-x86_64-${version}"
           cosign sign-blob --yes \
-            --output-signature "dist/${package}.sig" \
-            --output-certificate "dist/${package}.pem" \
+            --bundle "dist/${package}.sigstore.json" \
             "dist/${package}.tar.gz"
 
       - name: Upload artifact
@@ -226,8 +225,7 @@ jobs:
           version="${{ steps.version.outputs.version }}"
           package="fuckipv6-windows-x86_64-${version}"
           cosign sign-blob --yes \
-            --output-signature "dist/${package}.sig" \
-            --output-certificate "dist/${package}.pem" \
+            --bundle "dist/${package}.sigstore.json" \
             "dist/${package}.tar.gz"
 
       - name: Upload artifact
@@ -338,8 +336,7 @@ jobs:
           version="${{ steps.version.outputs.version }}"
           package="fuckipv6-macos-${{ matrix.arch }}-${version}"
           cosign sign-blob --yes \
-            --output-signature "dist/${package}.sig" \
-            --output-certificate "dist/${package}.pem" \
+            --bundle "dist/${package}.sigstore.json" \
             "dist/${package}.tar.gz"
 
       - name: Upload artifact

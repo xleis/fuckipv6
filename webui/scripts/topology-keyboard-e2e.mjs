@@ -823,17 +823,27 @@ async function main() {
       `el?.matches('g.topology-node[data-node-id="${BOB_ID}"]')`,
       "next graph node after ArrowRight",
     );
+    // Space before Enter: Enter opens the detail drawer, which moves focus into it, so a
+    // Space pressed afterwards reaches the drawer rather than the node.
+    await pressKey(cdp, " ");
+    await waitFor(
+      cdp,
+      `document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.getAttribute("data-selected") === "true"`,
+      "Bob selection after Space",
+    );
     await pressKey(cdp, "Enter");
     await waitFor(
       cdp,
       `document.querySelector('[data-testid="topology-node-detail"] h2')?.textContent?.trim() === "Bob"`,
       "Bob node detail after Enter",
     );
-    await pressKey(cdp, " ");
-    await waitFor(
+    // Close the drawer so the keyboard walk returns to the graph; the drawer's trap
+    // restores focus to the node it was opened from.
+    await pressKey(cdp, "Escape");
+    await waitForActive(
       cdp,
-      `document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.getAttribute("data-selected") === "true"`,
-      "Bob selection after Space",
+      `el?.matches('g.topology-node[data-node-id="${BOB_ID}"]')`,
+      "focus restored to the node after closing details",
     );
     checks.push("graph roving focus, Enter open and Space selection work by keyboard");
     // Two-pass sweep: locate-current is disabled until a node has a focus target, and a

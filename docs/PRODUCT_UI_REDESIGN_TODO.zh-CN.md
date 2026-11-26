@@ -5230,7 +5230,7 @@ rootless 拓扑下并不真正生效（`partition_enforced` 只证明规则命�
 - [x] TUN/路由/DNS/进程残留自动清理；
 - [x] 所有失败有硬超时和自动恢复；
 - [x] 用户不需要手工 kill；
-- [ ] 完成全套故障注入证据。
+- [x] 完成全套故障注入证据。
 
 **验收**：历史“每次测试断网且需手工 kill”的问题有自动化复现与通过证据。
 
@@ -5321,6 +5321,29 @@ suite 由同一个 runner 驱动，逐个执行并记录自己的跳过理由，
 汇总为 `passed=6, skipped=6, failed=0, timeout=0`，脚本已接入 `verify.yml`（CI runner 有 root，五个
 "需 root"的 suite 在那里才真正执行）。第 8 条我仍**不勾**：按上一条的判断，这里的"全套"取决于清单范围，
 而六项被跳过的 suite 在本机没有结果——它们有理由，但没有证据。
+
+**全套 12/12 实跑收口（2026-11-26，commit `b730842` 干净工作区，`--require-full` 全绿）**：排查并修复了三处阻止 `--require-full` 跑通的真实缺陷后，在干净工作区以 `sudo -n env HOME=/home/xlei … python3 scripts/fault-injection-suite.py --require-full --report target/fault-injection/report.json` 一次性完成全部 12 个套件并全部通过：
+
+1. `scripts/fault-injection-suite.py` 原用 `hasattr(sys, "geteuid")`（`geteuid` 位于 `os` 模块），导致即便以 root 运行也始终判为 `is_root=False` 并跳过 5 项 root 套件；同时 Cargo 1.100 取消了 `target/release/deps`，原 release 检查误判跳过。两处均已修复并补齐 9 项回归单测；
+2. `crates/coordinator/tests/w14_admin_recovery_multinode.rs` 的 `apply_partition` 原在 Coordinator 命名空间 `output` 链里误按 `ip daddr <coordinator_ip>` 拦截（Coordinator 回包携带的是 `ip saddr <coordinator_ip>`），导致分区规则实际未命中任何包（此前误归因给 rootless 环境）；现改为 `input ip daddr` + `output ip saddr` 双向拦截，同时将 `scripts/test-w14-admin-recovery-netns.sh` 隔离进 `unshare --net --mount --fork --propagation private`；
+3. `scripts/test-w15-file-netns.sh` 补齐 `bootstrap_coordinator_governance`（解除新建网络的候选治理冻结）与 Cargo 1.100 `target/release/build` 的 `blake3` 路径兼容；`scripts/w12-rootless-netns.sh` 在 `sudo` 下降权回调用者继续走无特权 user+mount+net+slirp 隔离，确保宿主 `/etc/resolv.conf`、`/etc/nsswitch.conf`、`iptables` 与默认路由零触碰。
+
+| 套件 | 域 | 状态 | 耗时(s) |
+|---|---|---|---|
+| `lifecycle-cleanup` | 生命周期 | passed | 4.3 |
+| `recovery` | 生命周期 | passed | 1.3 |
+| `traffic-routing` | 路由 | passed | 3.4 |
+| `exit-node` | Exit | passed | 263.2 |
+| `w12-interference` | 网络 | passed | 193.6 |
+| `w12-exit-local` | Exit | passed | 62.8 |
+| `w12-p2p-invite` | 网络 | passed | 29.7 |
+| `w13-relay-failure` | Relay | passed | 165.0 |
+| `w14-admin-recovery-netns` | Coordinator | passed | 5.3 |
+| `w14-admin-recovery-drill` | Coordinator | passed | 1.3 |
+| `w14-coordinator-fault` | Coordinator | passed | 62.1 |
+| `w15-file` | File | passed | 126.7 |
+
+汇总：**`passed=12, skipped=0, failed=0, timeout=0`**（`is_root=true`, `require_full=true`）。报告路径 `target/fault-injection/report.json`（SHA-256 `b77f80c440fcf20a3525ecb30e81b79b924bbf79d267890ef570396b420c67de`）、`target/fault-injection/report.md`（SHA-256 `17ee946002f32baf7986fd0f7403e5ae0ec2d9d19653e37aa7ade9faf7efd713`），对应 `target/release/fuckipv6` SHA-256 为 `74445463eddca2eafd18d6823e2a6b78531ee94a844305d762c109aa1654e9f8`。运行前后逐项核对宿主 `ip link`、`ip route`、`ip -6 route`、`ip rule`、`ip -6 rule`、`/etc/resolv.conf`、`/etc/nsswitch.conf` 与 `ip netns list` 均无变更残留。据此勾选第 8 条（范围限 Linux；系统重启服务实测仍在第 4 条保持未勾，macOS/Windows/Android 实机仍由 W17/W18-09 跟踪）。
 
 **补充（2026-11-21，先误判后更正）**：在有桌面会话的主机上这些用例按策略跳过
 （`skip_webui_lifetime_test_on_desktop`）。本轮先用

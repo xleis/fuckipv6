@@ -1181,6 +1181,88 @@ mod tests {
             .unwrap_or(true));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stress_lifecycles_restore_threads_descriptors_and_resident_memory() {
+        fn sample() -> (usize, usize, u64) {
+            let status = std::fs::read_to_string("/proc/self/status").expect("proc status");
+            let mut threads = 0usize;
+            let mut rss_kib = 0u64;
+            for line in status.lines() {
+                if let Some(value) = line.strip_prefix("Threads:") {
+                    threads = value.trim().parse().unwrap_or(0);
+                }
+                if let Some(value) = line.strip_prefix("VmRSS:") {
+                    rss_kib = value
+                        .split_whitespace()
+                        .next()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(0);
+                }
+            }
+            let descriptors = std::fs::read_dir("/proc/self/fd")
+                .map(|entries| entries.count())
+                .unwrap_or(0);
+            (threads, descriptors, rss_kib)
+        }
+
+        fn lifecycle(runtime: &FileRuntime, share: &FileShare, index: u32) {
+            let transfer_id =
+                TransferId::from_public_key(format!("resource-transfer-{index}").as_bytes());
+            let operation_id =
+                OperationId::from_public_key(format!("resource-operation-{index}").as_bytes());
+            let (_tx, cancel) = watch::channel(false);
+            let transfer = runtime
+                .begin_upload_cancellable(
+                    upload_session_for(UploadSessionSpec {
+                        share,
+                        actor: owner(),
+                        path: "resource.txt",
+                        content: b"abcd",
+                        chunk_size: 4,
+                        transfer_id,
+                        operation_id: operation_id.clone(),
+                        expires_at_unix_ms: 1_000,
+                    }),
+                    &context(share),
+                    true,
+                    UploadAdmission::default(),
+                    TransferOperationCancellation::new(operation_id, cancel),
+                    20,
+                )
+                .expect("resource lifecycle upload");
+            drop(transfer);
+        }
+
+        let (_temporary, runtime, share) = setup();
+        // Warm up first so lazily created blocking pools are already accounted
+        // for; the assertion is about growth caused by transfer lifecycles.
+        for index in 0..32_u32 {
+            lifecycle(&runtime, &share, index);
+        }
+        let (threads_before, descriptors_before, rss_before) = sample();
+        for index in 32..288_u32 {
+            lifecycle(&runtime, &share, index);
+        }
+        let (threads_after, descriptors_after, rss_after) = sample();
+
+        // The harness runs tests in parallel threads inside one process, so the
+        // bounds below are deliberately generous: they still fail on a per-
+        // transfer leak (256 lifecycles would show up immediately).
+        assert!(
+            threads_after <= threads_before + 8,
+            "thread count grew across 256 lifecycles: {threads_before} -> {threads_after}"
+        );
+        assert!(
+            descriptors_after <= descriptors_before + 8,
+            "descriptor count grew across 256 lifecycles: {descriptors_before} -> {descriptors_after}"
+        );
+        assert!(
+            rss_after <= rss_before + 16 * 1024,
+            "resident memory grew across 256 lifecycles: {rss_before} KiB -> {rss_after} KiB"
+        );
+    }
+
     #[test]
     fn disabling_capability_invalidates_existing_handles_and_clears_admission() {
         let (_temporary, runtime, share) = setup();

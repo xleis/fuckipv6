@@ -3910,7 +3910,7 @@ macOS/Windows 实机句柄行为。Windows 重解析点、macOS 实机竞态以�
 - [x] 限制目录扫描深度和条目数；
 - [x] 限制事件队列和日志增长；
 - [x] 满载时不影响 node/control 基本功能（Linux 独立三节点四传输槽位满载验收通过）；
-- [ ] 压力测试后文件句柄、线程和内存回到基线（Linux 进程内、Windows/Wine 兼容性自动化、独立三节点满载及 SIGKILL 恢复已通过；Windows/macOS 实机待验收）；
+- [ ] 压力测试后文件句柄、线程和内存回到基线（Linux 进程内新增线程/FD/RSS 基线断言 `stress_lifecycles_restore_threads_descriptors_and_resident_memory`：256 次生命周期后线程 +≤8、FD +≤8、RSS +≤16 MiB；Windows/Wine 兼容性自动化、独立三节点满载与 SIGKILL 恢复已通过；Windows/macOS 实机仍待验收，归 W17）；
 - [x] 报告录明阈值与恢复结果。
 
 **验收**：恶意或误用传输无法耗尽节点资源，File 故障不拖垮数据面。

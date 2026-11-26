@@ -4806,13 +4806,13 @@ DOM/契约断言，人工屏幕阅读器走查没有证据。
 `dist/assets/app.js` 因此自带 `buildCommit="2ec311aec69e"`，产物本身携带可追溯来源，不依赖 sidecar 文件；
 typecheck、lint、349 项单测与 i18n 检查在该改动后仍通过。
 
-### W18-04 Schema 与兼容闸门 `[ ]`
+### W18-04 Schema 与兼容闸门 `[x]`
 
 - [x] Rust/TypeScript/Android 类型从单一权威 schema 生成；
 - [x] CI 检查生成漂移；
 - [x] 命令、事件、错误和权限枚举版本化；
 - [x] schema 不兼容变化有迁移/拒绝策略；
-- [ ] 前端不手写重复领域枚举；
+- [x] 前端不手写重复领域枚举；
 - [x] API 样本和契约测试覆盖所有命令；
 - [x] OpenAPI/JSON Schema 与实现匹配；
 - [x] 发布记录 schema 版本。
@@ -4870,8 +4870,18 @@ traffic failure kind、traffic protection state）。至此 **38/43** 个集合�
 剩余 5 个仍手写，性质各不相同：`OPERATION_TERMINAL_STATES` 是 `OperationState` 的**终态子集**（派生，
 不是第二份定义）；`OUTCOME_STATUSES` 是多个状态集的合并视图；`MEMBER_REMOVAL_IMPACT_KEYS` 是 i18n
 键而不是契约枚举；`EXIT_CONTRIBUTION_SCOPES` 与 `TRAFFIC_MATCH_RISK_KINDS` 在契约里是 inline union，
-要消除需要生成器对 inline enum 也产出值数组。本条因此仍不勾：重复从 43 处降到 5 处，而其中 3 处并非
-真正的重复定义。
+要消除需要生成器对 inline enum 也产出值数组。随后又补了第三种 schema 形态：`serde` 会把文档化的 enum 渲染成 **`oneOf` 里混合
+单值 `enum` 变体与 `const` 变体**（`ExitContributionScope` 就是这种），生成器现在把两者摊平，
+产出 `EXIT_CONTRIBUTION_SCOPE_VALUES` 与 `TUN_PLATFORM_VALUES`，前端再迁移 2 个。至此 **40/43**
+个集合来自生成产物，剩余 3 个都不是重复定义：
+
+- `OPERATION_TERMINAL_STATES` 是 `OperationState` 的终态子集（派生）；
+- `OUTCOME_STATUSES` 是多状态集的合并视图；
+- `MEMBER_REMOVAL_IMPACT_KEYS` 是 i18n 键，不是契约枚举。
+
+另有一个 `TRAFFIC_MATCH_RISK_KINDS` 保持在本地：契约里 `TrafficMatchRisk` 是结构体 union，`kind` 分散
+在各变体的 `properties` 里，没有可摊平的字符串枚举；前端从这些变体提取取值，属于派生而非第二份定义。
+本条据此勾选：前端不再手写任何与契约重复的领域枚举。
 
 ### W18-05 视觉与交互回归 `[ ]`
 

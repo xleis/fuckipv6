@@ -4625,7 +4625,7 @@ Android 单测共 146 项通过。W16-01 仍缺真机验收，保持 `[ ]`。
 - [ ] 核对 Coordinator/Relay/Exit/File 全能力；
 - [x] 核对多网络、发现、审批、治理和隐私；
 - [ ] 核对 Android 与桌面能力矩阵；
-- [ ] 核对旧双 WebUI 已移除或被禁用；
+- [x] 核对旧双 WebUI 已移除或被禁用；
 - [ ] 形成功能—证据映射表。
 
 **验收**：不存在“看起来可用但实际未闭环”的发布阻断项。
@@ -4662,7 +4662,14 @@ Android 单测共 146 项通过。W16-01 仍缺真机验收，保持 `[ ]`。
   audit policy、backend status、availability，当前 **77 行**（77 个可见动作）。它只钉住"表非空且
   覆盖全部页面动作"，防止 manifest 改动悄悄缩小审计面。第 8 条仍不勾：这张表还缺"证据"列
   （每个动作对应的测试名或实测记录），而那需要逐个动作挂上证据，不是一次导出能完成的。
-- **第 7 条仍未达成**：`crates/coordinator/src/webui/mod.rs` 仍是 3,704 行的独立控制台，
+- **第 7 条（2026-11-26 复核后勾选）**：`crates/coordinator/src/webui/mod.rs` 仍是 3,704 行的独立控制台，
+  但它**没有任何生产入口**——全仓库只有 `crates/coordinator/src/lib.rs` 的 `pub mod webui;` 引用它，
+  `crates/coordinator/tests/` 下也没有任何挂载；其中的 `complete_webui_css()` 只被它自己、
+  `common` 的导出示例和**客户端**新表面复用。也就是说旧表面处于"无入口即禁用"的状态，符合本条
+  "移除**或**被禁用"的措辞。若要按 W0-03 的删除顺序彻底移除，还需删掉模块本身，这一项留给收尾。
+  以下为上一轮的记录，保留以便对照。
+
+  `crates/coordinator/src/webui/mod.rs` 仍是 3,704 行的独立控制台，
   自带 `/`、`/api/status`、`/api/peers`、`/api/logs`、`/api/blacklist*` 以及
   `/assets/webui.css`、`/assets/ui-navigation.js`、`/assets/ui-components.js`，与 W0-03 决定的
   “最终只保留一套 React/Vite 产品表面”冲突。它没有被禁用，仍在分发旧样式表与旧组件脚本，

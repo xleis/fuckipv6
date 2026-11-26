@@ -376,6 +376,7 @@ def helper_test_arguments() -> list[str]:
         "scripts/test_check_android_i18n.py",
         "scripts/test_check_surface_state_parity.py",
         "scripts/test_check_ignored_tests.py",
+        "scripts/test_release_notes.py",
         "-v",
     ]
 

@@ -16,6 +16,18 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE = PROJECT_ROOT / "docs" / "RELEASE_NOTES_TEMPLATE.md"
+VERSIONED_NOTES = PROJECT_ROOT / "docs" / "release-notes"
+
+
+def versioned_source(version: str) -> Path | None:
+    """Per-release notes filled by a human, kept next to the template.
+
+    A published release needs its capability, limitation and migration sections
+    written for that version; the generic template can only ever hold
+    placeholders for two of them.
+    """
+    candidate = VERSIONED_NOTES / f"{version}.md"
+    return candidate if candidate.is_file() else None
 
 
 def git(*arguments: str) -> str:
@@ -44,7 +56,8 @@ def main() -> int:
     parser.add_argument("--allow-placeholder-migration", action="store_true")
     args = parser.parse_args()
 
-    template = TEMPLATE.read_text(encoding="utf-8")
+    source = versioned_source(args.version)
+    template = (source or TEMPLATE).read_text(encoding="utf-8")
     notes = (
         template.replace("{{VERSION}}", args.version)
         .replace("{{COMMIT}}", git("rev-parse", "--short=12", "HEAD"))
@@ -56,7 +69,7 @@ def main() -> int:
             "<!-- 本版本实际可用、且在目标平台有证据支撑的能力。逐条给出证据位置。 -->",
             section,
         )
-    if "<!--" in notes and not args.allow_placeholder_migration:
+    if source is None and "<!--" in notes and not args.allow_placeholder_migration:
         print(
             "release-notes: the template still has an unfilled section; fill 限制 and 迁移 "
             "before publishing (or pass --allow-placeholder-migration for a draft)",

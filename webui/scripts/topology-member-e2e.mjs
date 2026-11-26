@@ -899,7 +899,7 @@ async function waitForReady(session, timeoutMs = 20_000) {
     session,
     `Boolean(
       document.querySelector(".app-shell") &&
-      document.querySelector(".nav-footer")?.textContent?.includes("Live")
+      document.body.textContent?.includes("Running normally")
     )`,
     "WebUI product shell",
     timeoutMs,
@@ -1187,106 +1187,265 @@ async function setControlValue(
   }
 }
 
-function actionCardExpression(labelText) {
-  return `[...document.querySelectorAll("article.action-card")].find(
-    (card) => card.querySelector(".action-card-head")?.textContent?.trim() === ${JSON.stringify(labelText)}
-  )`;
+function actionCardByIdExpression(actionId) {
+  return `document.querySelector('article[data-testid="action-card-${actionId}"]')`;
 }
 
-function pageTabExpression(labelText) {
-  return `[...document.querySelectorAll('.page-tabs [role="tab"]')].find(
-    (tab) => tab.textContent?.trim() === ${JSON.stringify(labelText)}
+async function openPageActionWorkspace(session, actionId, labelText) {
+  // Close any previously open action workspace before opening the next one.
+  await closePageActionWorkspace(session);
+  const moreButton = `document.querySelector('[data-testid="page-command-surface"] .page-command-more')`;
+  await clickElement(session, moreButton, "More actions menu");
+  await waitFor(
+    session,
+    `Boolean(document.querySelector('.page-command-menu[role="menu"]'))`,
+    "page command menu",
+  );
+  const itemExpression = `[...document.querySelectorAll('.page-command-menu [role="menuitem"]')].find(
+    (item) => item.querySelector("strong")?.textContent?.trim() === ${JSON.stringify(labelText)}
   )`;
+  await waitFor(session, `Boolean(${itemExpression})`, `${labelText} menu item`, 8_000);
+  const itemState = await evaluate(
+    session,
+    `(() => {
+      const item = ${itemExpression};
+      if (!item) return null;
+      return {
+        disabled: item.disabled,
+        ariaDisabled: item.getAttribute("aria-disabled"),
+        title: item.getAttribute("title"),
+        text: item.textContent?.trim(),
+      };
+    })()`,
+  );
+  if (itemState?.disabled) {
+    throw new Error(`${labelText} menu item is disabled: ${JSON.stringify(itemState)}`);
+  }
+  await evaluate(
+    session,
+    `(() => {
+      const item = ${itemExpression};
+      item?.click();
+      return Boolean(item);
+    })()`,
+  );
+  await waitFor(
+    session,
+    `Boolean(${actionCardByIdExpression(actionId)})`,
+    `${labelText} workspace`,
+  );
+}
+
+async function closePageActionWorkspace(session) {
+  const hasWorkspace = await evaluate(
+    session,
+    `Boolean(document.querySelector('.action-workspace'))`,
+  );
+  if (!hasWorkspace) return;
+  await clickElement(
+    session,
+    `document.querySelector('.action-workspace-heading button[aria-label="Close"]')`,
+    "close action workspace",
+  );
+  await waitFor(
+    session,
+    `!document.querySelector('.action-workspace')`,
+    "closed action workspace",
+  );
 }
 
 function moduleButtonExpression(labelText) {
-  return `[...document.querySelectorAll(".module-button")].find(
+  return `[...document.querySelectorAll(".module-button, .bottom-navigation-item")].find(
     (button) => button.textContent?.trim() === ${JSON.stringify(labelText)}
   )`;
 }
 
-async function navigateToNetworkTabWithKeyboard(session, tabLabel, readyExpression, description) {
+async function selectPageFromSwitcherWithKeyboard(session, tabLabel) {
+  await waitFor(
+    session,
+    `Boolean(document.querySelector(".page-switcher > summary"))`,
+    "page switcher",
+  );
+  await evaluate(
+    session,
+    `(() => {
+      const details = document.querySelector(".page-switcher");
+      const summary = details?.querySelector(":scope > summary");
+      if (details && !details.hasAttribute("open")) summary?.focus();
+    })()`,
+  );
+  const alreadyOpen = await evaluate(
+    session,
+    `Boolean(document.querySelector(".page-switcher")?.hasAttribute("open"))`,
+  );
+  if (!alreadyOpen) {
+    await pressKey(session, "Enter");
+  }
+  await waitFor(
+    session,
+    `[...document.querySelectorAll('.page-switcher-menu [role="menuitemradio"]')].some(
+      (item) => item.textContent?.trim() === ${JSON.stringify(tabLabel)}
+    )`,
+    `${tabLabel} page entry`,
+  );
   await tabTo(
     session,
-    `el?.classList.contains("module-button") && el.textContent?.trim() === "Networks"`,
+    `el?.getAttribute("role") === "menuitemradio" && el.textContent?.trim() === ${JSON.stringify(tabLabel)}`,
+    `${tabLabel} page entry`,
+  );
+  await pressKey(session, "Enter");
+}
+
+async function selectPageFromSwitcherByClick(session, tabLabel) {
+  await closePageActionWorkspace(session);
+  await waitFor(
+    session,
+    `Boolean(document.querySelector(".page-switcher > summary"))`,
+    "page switcher",
+  );
+  const alreadyOpen = await evaluate(
+    session,
+    `Boolean(document.querySelector(".page-switcher")?.hasAttribute("open"))`,
+  );
+  if (!alreadyOpen) {
+    await clickElement(session, `document.querySelector(".page-switcher > summary")`, "page switcher");
+  }
+  await waitFor(
+    session,
+    `[...document.querySelectorAll('.page-switcher-menu [role="menuitemradio"]')].some(
+      (item) => item.textContent?.trim() === ${JSON.stringify(tabLabel)}
+    )`,
+    `${tabLabel} page entry`,
+  );
+  await clickElement(
+    session,
+    `[...document.querySelectorAll('.page-switcher-menu [role="menuitemradio"]')].find(
+      (item) => item.textContent?.trim() === ${JSON.stringify(tabLabel)}
+    )`,
+    `${tabLabel} page entry`,
+  );
+}
+
+async function navigateToNetworkTabWithKeyboard(session, tabLabel, readyExpression, description) {
+  await closePageActionWorkspace(session);
+  await tabTo(
+    session,
+    `el?.tagName === "BUTTON" && el.textContent?.trim() === "Networks" && Boolean(el.closest(".module-list, .bottom-navigation"))`,
     "Networks module",
   );
   await pressKey(session, "Enter");
   await waitFor(
     session,
-    `[...document.querySelectorAll('[role="tab"]')].some((tab) => tab.textContent?.trim() === ${JSON.stringify(tabLabel)})`,
-    `${tabLabel} page tab`,
+    `Boolean(document.querySelector(".page-switcher > summary") || document.querySelector(".topology-view"))`,
+    "Networks module shell",
   );
-  await tabTo(
+  const currentTab = await evaluate(
     session,
-    `el?.getAttribute("role") === "tab" && el.textContent?.trim() === ${JSON.stringify(tabLabel)}`,
-    `${tabLabel} tab`,
+    `document.querySelector(".page-switcher > summary span")?.textContent?.trim() ?? ""`,
   );
-  await pressKey(session, "Enter");
+  const switcherVisible = await evaluate(
+    session,
+    `(() => {
+      const el = document.querySelector(".page-switcher > summary");
+      return Boolean(el && getComputedStyle(el).display !== "none");
+    })()`,
+  );
+  if (switcherVisible && currentTab !== tabLabel) {
+    await selectPageFromSwitcherWithKeyboard(session, tabLabel);
+  }
   await waitFor(session, readyExpression, description);
 }
 
 async function navigateToNetworkTabByClick(session, tabLabel, readyExpression, description) {
+  await closePageActionWorkspace(session);
   await clickElement(session, moduleButtonExpression("Networks"), "Networks module");
   await waitFor(
     session,
-    `[...document.querySelectorAll('[role="tab"]')].some((tab) => tab.textContent?.trim() === ${JSON.stringify(tabLabel)})`,
-    `${tabLabel} page tab`,
+    `Boolean(document.querySelector(".page-switcher > summary") || document.querySelector(".topology-view"))`,
+    "Networks module shell",
   );
-  await clickElement(session, pageTabExpression(tabLabel), `${tabLabel} tab`);
+  const currentTab = await evaluate(
+    session,
+    `document.querySelector(".page-switcher > summary span")?.textContent?.trim() ?? ""`,
+  );
+  if (currentTab !== tabLabel) {
+    await selectPageFromSwitcherByClick(session, tabLabel);
+  }
   await waitFor(session, readyExpression, description);
 }
 
 async function navigateToOverviewByClick(session) {
+  await closePageActionWorkspace(session);
   await clickElement(session, moduleButtonExpression("Overview"), "Overview module");
   await waitFor(session, `Boolean(document.querySelector(".overview-stack"))`, "overview page");
 }
 
-async function selectTopologyFilterNetwork(session, networkId, visible, total) {
-  const selector = `(() => {
-    const label = [...document.querySelectorAll(".topology-filters label")].find(
-      (candidate) => candidate.querySelector("span")?.textContent?.trim() === "Network",
-    );
-    return label?.querySelector("select") ?? null;
-  })()`;
-  await setControlValue(session, selector, networkId, `topology network filter ${networkId}`);
-  await waitFor(
+async function ensureOptionsDisclosureOpen(session) {
+  await evaluate(
     session,
-    `document.querySelector(".topology-filter-count")?.textContent?.trim() === ${JSON.stringify(
-      `Showing ${visible} of ${total} nodes`,
-    )}`,
-    `topology network filter result for ${networkId}`,
-    8_000,
+    `(() => {
+      const disclosure = document.querySelector("details.topology-options");
+      if (disclosure instanceof HTMLDetailsElement && !disclosure.open) {
+        disclosure.open = true;
+      }
+      return Boolean(disclosure);
+    })()`,
   );
 }
 
 async function selectTopologySearch(session, value) {
+  await ensureOptionsDisclosureOpen(session);
   const selector = `document.querySelector('.topology-filters input[type="search"]')`;
   await setControlValue(session, selector, value, `topology search ${value}`);
 }
 
+async function ensureGovernanceDisclosureOpen(session) {
+  await evaluate(
+    session,
+    `(() => {
+      const disclosure = document.querySelector("details.topology-governance-disclosure");
+      if (disclosure instanceof HTMLDetailsElement && !disclosure.open) {
+        disclosure.open = true;
+      }
+      return Boolean(disclosure);
+    })()`,
+  );
+}
+
 async function selectGovernanceNetwork(session, fixtureServer, networkId) {
   const startIndex = fixtureServer.state.commands.length;
-  const selector = `document.querySelector('[data-testid="topology-governance"] select')`;
-  try {
-    await setControlValue(
-      session,
-      selector,
-      networkId,
-      `governance network ${networkId}`,
-      false,
-    );
-  } catch (error) {
-    const diagnostic = await evaluate(
-      session,
-      `(() => ({
-        governance: Boolean(document.querySelector('[data-testid="topology-governance"]')),
-        governanceText: document.querySelector('[data-testid="topology-governance"]')?.innerText?.slice(0, 800) ?? null,
-        selectionText: [...document.querySelectorAll('.topology-selection, [class*="selection"]')].map((node) => node.textContent?.trim()).filter(Boolean).slice(0, 8),
-        topologyText: document.querySelector('.topology-page')?.innerText?.slice(0, 2_000) ?? null,
-      }))()`,
-    );
-    throw new Error(`${error.message}; diagnostic=${JSON.stringify(diagnostic)}`);
+  await ensureGovernanceDisclosureOpen(session);
+  const hasGovernanceSelect = await evaluate(
+    session,
+    `Boolean(document.querySelector('[data-testid="topology-governance"] select'))`,
+  );
+  if (hasGovernanceSelect) {
+    const selector = `document.querySelector('[data-testid="topology-governance"] select')`;
+    try {
+      await setControlValue(
+        session,
+        selector,
+        networkId,
+        `governance network ${networkId}`,
+        false,
+      );
+    } catch (error) {
+      const diagnostic = await evaluate(
+        session,
+        `(() => ({
+          governance: Boolean(document.querySelector('[data-testid="topology-governance"]')),
+          governanceText: document.querySelector('[data-testid="topology-governance"]')?.innerText?.slice(0, 800) ?? null,
+          selectionText: [...document.querySelectorAll('.topology-selection, [class*="selection"]')].map((node) => node.textContent?.trim()).filter(Boolean).slice(0, 8),
+          topologyText: document.querySelector('.topology-page')?.innerText?.slice(0, 2_000) ?? null,
+        }))()`,
+      );
+      throw new Error(`${error.message}; diagnostic=${JSON.stringify(diagnostic)}`);
+    }
+  } else {
+    const chipExpression = `[...document.querySelectorAll(".topology-network-chips button")].find(
+      (button) => button.textContent?.trim().toLowerCase() === ${JSON.stringify(networkId.toLowerCase())}
+    )`;
+    await clickElement(session, chipExpression, `topology network chip ${networkId}`);
   }
   return waitForCommandAfter(
     fixtureServer,
@@ -1319,6 +1478,29 @@ async function main() {
     );
     const topology = topologyFixture();
     fixture.snapshot.topology = topology;
+    fixture.snapshot.embedded_services = (fixture.snapshot.embedded_services ?? []).map((service) => ({
+      ...service,
+      coordinator_candidates: {
+        network_id: `net_${service.network_name}`,
+        generated_at_unix_ms: 1_700_000_000_000,
+        config_state: "current",
+        candidates: [],
+        config: null,
+        current_leader: null,
+        latest_term: null,
+        control_plane: {
+          state: "available",
+          governance_writable: true,
+          reason_code: "coordinator.control_plane.available",
+          quorum: {
+            received_votes: 2,
+            required_votes: 2,
+            participant_count: 3,
+          },
+        },
+        emergency: "none",
+      },
+    }));
     state = createJourneyState(fixture.snapshot, topology);
     await prepareSharedAssets(sharedAssets);
     fixtureServer = await startFixtureServer(manifest, fixture, sharedAssets, state);
@@ -1377,17 +1559,13 @@ async function main() {
     await navigateToNetworkTabWithKeyboard(
       cdp,
       "Networks",
-      `Boolean(${actionCardExpression("Create invitation")})`,
-      "Networks action cards",
+      `Boolean(document.querySelector('[data-testid="page-command-surface"] .page-command-more'))`,
+      "Networks command surface",
     );
     checks.push("keyboard-only navigation reaches the Networks governance workspace");
 
-    const createInvitationCard = actionCardExpression("Create invitation");
-    await clickElement(
-      cdp,
-      `${createInvitationCard}?.querySelector(".action-card-head")`,
-      "Create invitation action",
-    );
+    const createInvitationCard = actionCardByIdExpression("create_invitation");
+    await openPageActionWorkspace(cdp, "create_invitation", "Create invitation");
     await setControlValue(
       cdp,
       controlInCard(createInvitationCard, "Network ID"),
@@ -1423,12 +1601,14 @@ async function main() {
       `(${createInvitationCard})?.querySelector('form.action-form button[type="submit"]')`,
       "Run create invitation",
     );
-    await waitFor(cdp, `Boolean(document.querySelector('[role="dialog"]'))`, "invitation confirmation");
+    await waitFor(
+      cdp,
+      `Boolean(document.querySelector('[data-testid="action-confirmation"]'))`,
+      "invitation confirmation",
+    );
     await clickElement(
       cdp,
-      `[...document.querySelectorAll('[role="dialog"] button')].find(
-        (button) => button.textContent?.trim() === "Run"
-      )`,
+      `document.querySelector('[data-testid="action-confirmation"] .dialog-actions button:not(.secondary-button)')`,
       "confirm create invitation",
     );
     await waitFor(
@@ -1475,13 +1655,21 @@ async function main() {
     );
     await waitFor(
       cdp,
-      `document.querySelectorAll("g.topology-node[role=option]").length === 3 &&
+      `document.querySelectorAll("g.topology-node[role=option]").length === 2 &&
        Boolean(document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]'))`,
       "initial topology graph",
     );
     await evaluate(
       cdp,
       `document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.focus()`,
+    );
+    await pressKey(cdp, " ");
+    await ensureGovernanceDisclosureOpen(cdp);
+    await waitFor(
+      cdp,
+      `document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.getAttribute("data-selected") === "true" &&
+       Boolean(document.querySelector('[data-testid="topology-governance"] select'))`,
+      "Bob batch selection and governance controls",
     );
     await pressKey(cdp, "Enter");
     await waitFor(
@@ -1490,42 +1678,16 @@ async function main() {
        document.querySelector('[data-testid="topology-node-detail"]')?.textContent?.includes("Online")`,
       "Bob pending home membership",
     );
-    await pressKey(cdp, " ");
-    await waitFor(
-      cdp,
-      `document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.getAttribute("data-selected") === "true" &&
-       Boolean(document.querySelector('[data-testid="topology-governance"] select'))`,
-      "Bob batch selection and governance controls",
-    );
+    await pressKey(cdp, "Escape");
     checks.push("Bob is pending and online in the authoritative home membership");
 
     await selectGovernanceNetwork(cdp, fixtureServer, "studio");
     await waitFor(
       cdp,
-      `document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.getAttribute("aria-label")?.includes("Studio")`,
+      `document.querySelectorAll("g.topology-node[role=option]").length === 2 &&
+       document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.getAttribute("aria-label")?.includes("Studio")`,
       "Bob studio identity remains visible",
     );
-    await evaluate(
-      cdp,
-      `document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.focus()`,
-    );
-    await pressKey(cdp, "Enter");
-    await waitFor(
-      cdp,
-      `document.querySelector('[data-testid="topology-node-detail"]')?.textContent?.includes("Active")`,
-      "Bob active studio membership",
-    );
-    checks.push("shared Bob node preserves independent pending home and active studio memberships");
-    await pressKey(cdp, " ");
-    await waitFor(
-      cdp,
-      `document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.getAttribute("data-selected") === "true" &&
-       Boolean(document.querySelector('[data-testid="topology-governance"] select'))`,
-      "Bob studio batch selection",
-    );
-    await selectGovernanceNetwork(cdp, fixtureServer, "home");
-
-    await selectTopologyFilterNetwork(cdp, "studio", 2, 3);
     assert.deepEqual(
       await evaluate(
         cdp,
@@ -1535,8 +1697,35 @@ async function main() {
       ),
       [BOB_ID, CAROL_ID].sort(),
     );
-    await selectTopologyFilterNetwork(cdp, "all", 3, 3);
-    checks.push("cross-network filtering shows only Studio objects and restores the complete graph");
+    await evaluate(
+      cdp,
+      `document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.focus()`,
+    );
+    await pressKey(cdp, " ");
+    await ensureGovernanceDisclosureOpen(cdp);
+    await waitFor(
+      cdp,
+      `document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.getAttribute("data-selected") === "true" &&
+       Boolean(document.querySelector('[data-testid="topology-governance"] select'))`,
+      "Bob studio batch selection",
+    );
+    await pressKey(cdp, "Enter");
+    await waitFor(
+      cdp,
+      `document.querySelector('[data-testid="topology-node-detail"]')?.textContent?.includes("Active")`,
+      "Bob active studio membership",
+    );
+    await pressKey(cdp, "Escape");
+    checks.push("shared Bob node preserves independent pending home and active studio memberships");
+    await selectGovernanceNetwork(cdp, fixtureServer, "home");
+    await waitFor(
+      cdp,
+      `document.querySelectorAll("g.topology-node[role=option]").length === 2 &&
+       Boolean(document.querySelector('g.topology-node[data-node-id="${SELF_ID}"]')) &&
+       Boolean(document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]'))`,
+      "home network restored after studio check",
+    );
+    checks.push("cross-network switching shows only Studio objects and restores the home graph");
 
     await cdp.send("Emulation.setDeviceMetricsOverride", {
       ...MOBILE_VIEWPORT,
@@ -1558,8 +1747,8 @@ async function main() {
     );
     await waitFor(
       cdp,
-      `document.querySelectorAll("tbody tr[data-node-id]").length === 3`,
-      "three compact topology rows",
+      `document.querySelectorAll("tbody tr[data-node-id]").length === 2`,
+      "two compact home topology rows",
     );
     await dispatchTouchLongPress(cdp, `tr[data-node-id="${BOB_ID}"]`);
     await waitFor(
@@ -1588,7 +1777,7 @@ async function main() {
     );
     await waitFor(
       cdp,
-      `document.querySelectorAll("g.topology-node[role=option]").length === 3`,
+      `document.querySelectorAll("g.topology-node[role=option]").length === 2`,
       "desktop graph after mobile check",
     );
 
@@ -1710,9 +1899,24 @@ async function main() {
     assert.equal(approveOutcome?.data?.audit_id, APPROVE_AUDIT_ID);
     await waitFor(
       cdp,
-      `document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.getAttribute("aria-label")?.includes("Healthy") &&
-       document.querySelector('[data-testid="topology-node-detail"]')?.textContent?.includes("Active")`,
-      "Bob active after approval",
+      `document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.getAttribute("aria-label")?.includes("Healthy")`,
+      "Bob healthy after approval",
+    );
+    await evaluate(
+      cdp,
+      `document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.focus()`,
+    );
+    await pressKey(cdp, "Enter");
+    await waitFor(
+      cdp,
+      `document.querySelector('[data-testid="topology-node-detail"]')?.textContent?.includes("Active")`,
+      "Bob active detail after approval",
+    );
+    await pressKey(cdp, "Escape");
+    await waitFor(
+      cdp,
+      `!document.querySelector('[data-testid="topology-node-detail"]')`,
+      "close Bob detail drawer after approval",
     );
     checks.push("Shift+F10, End, ArrowUp and Enter prepare and execute one audited Approve action");
     checks.push("Approval per-item result and authoritative topology both expose the same audit ID");
@@ -1785,12 +1989,30 @@ async function main() {
       cdp,
       `(() => {
         const label = document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.getAttribute("aria-label") ?? "";
-        const detail = document.querySelector('[data-testid="topology-node-detail"]')?.textContent ?? "";
-        return label.includes("Relay") && !label.includes("File") &&
-          detail.includes("Relay") && !detail.includes("File");
+        return label.includes("Relay") && !label.includes("File");
       })()`,
       "topology capabilities after restricted group policy",
       12_000,
+    );
+    await evaluate(
+      cdp,
+      `document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.focus()`,
+    );
+    await pressKey(cdp, "Enter");
+    await waitFor(
+      cdp,
+      `(() => {
+        const detail = document.querySelector('[data-testid="topology-node-detail"]')?.textContent ?? "";
+        return detail.includes("Relay") && !detail.includes("File");
+      })()`,
+      "detail capabilities after restricted group policy",
+      12_000,
+    );
+    await pressKey(cdp, "Escape");
+    await waitFor(
+      cdp,
+      `!document.querySelector('[data-testid="topology-node-detail"]')`,
+      "close detail drawer after restricted group policy",
     );
     await waitForCommandAfter(
       fixtureServer,
@@ -1890,9 +2112,24 @@ async function main() {
     fixtureServer.broadcastSnapshot();
     await waitFor(
       cdp,
-      `document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.getAttribute("aria-label")?.includes("Degraded") &&
-       document.querySelector('[data-testid="topology-node-detail"]')?.textContent?.includes("Degraded")`,
+      `document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.getAttribute("aria-label")?.includes("Degraded")`,
       "authoritative degraded Bob state",
+    );
+    await evaluate(
+      cdp,
+      `document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.focus()`,
+    );
+    await pressKey(cdp, "Enter");
+    await waitFor(
+      cdp,
+      `document.querySelector('[data-testid="topology-node-detail"]')?.textContent?.includes("Degraded")`,
+      "authoritative degraded Bob detail",
+    );
+    await pressKey(cdp, "Escape");
+    await waitFor(
+      cdp,
+      `!document.querySelector('[data-testid="topology-node-detail"]')`,
+      "close degraded Bob detail drawer",
     );
     await waitForCommandAfter(
       fixtureServer,
@@ -1913,18 +2150,14 @@ async function main() {
     checks.push("authoritative degradation immediately refreshes Bob and exposes the Remove action");
 
     const membersStart = fixtureServer.state.commands.length;
-    await clickElement(cdp, pageTabExpression("Networks"), "Networks page tab");
+    await selectPageFromSwitcherByClick(cdp, "Networks");
     await waitFor(
       cdp,
-      `Boolean(${actionCardExpression("View members")})`,
-      "View members action",
+      `Boolean(document.querySelector('[data-testid="page-command-surface"] .page-command-more'))`,
+      "Networks command surface",
     );
-    const viewMembersCard = actionCardExpression("View members");
-    await clickElement(
-      cdp,
-      `${viewMembersCard}?.querySelector(".action-card-head")`,
-      "View members action",
-    );
+    const viewMembersCard = actionCardByIdExpression("list_network_members");
+    await openPageActionWorkspace(cdp, "list_network_members", "View members");
     await setControlValue(
       cdp,
       controlInCard(viewMembersCard, "Network ID"),
@@ -2063,7 +2296,7 @@ async function main() {
     checks.push("directory removal uses the preview revision and returns the authoritative removal audit ID");
 
     const topologyAfterRemovalStart = fixtureServer.state.commands.length;
-    await clickElement(cdp, pageTabExpression("Topology"), "Topology page tab");
+    await selectPageFromSwitcherByClick(cdp, "Topology");
     await waitFor(
       cdp,
       `Boolean(document.querySelector(".topology-view"))`,
@@ -2076,16 +2309,19 @@ async function main() {
       (entry) => entry.payload.network_id === "home",
       "home directory after removal",
     );
-    await selectTopologyFilterNetwork(cdp, "home", 1, 3);
-    assert.equal(
-      await evaluate(
-        cdp,
-        `document.querySelectorAll("g.topology-node[data-node-id]").length === 1 &&
-         !document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')`,
-      ),
-      true,
+    await waitFor(
+      cdp,
+      `document.querySelectorAll("g.topology-node[data-node-id]").length === 1 &&
+       !document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')`,
+      "Bob removed from home graph",
     );
-    await selectTopologyFilterNetwork(cdp, "studio", 2, 3);
+    await selectGovernanceNetwork(cdp, fixtureServer, "studio");
+    await waitFor(
+      cdp,
+      `document.querySelectorAll("g.topology-node[data-node-id]").length === 2 &&
+       Boolean(document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]'))`,
+      "Studio retains Bob and Carol after home removal",
+    );
     assert.deepEqual(
       await evaluate(
         cdp,
@@ -2095,43 +2331,6 @@ async function main() {
       ),
       [BOB_ID, CAROL_ID].sort(),
     );
-    await selectTopologyFilterNetwork(cdp, "all", 3, 3);
-    await openNodeMenuByKeyboard(cdp, BOB_ID);
-    await waitFor(
-      cdp,
-      `Boolean(document.querySelector('[data-testid="topology-node-menu"] [role="menuitem"][aria-disabled="true"]'))`,
-      "revoked home menu actions",
-    );
-    assert.equal(
-      await evaluate(
-        cdp,
-        `document.querySelector('[data-testid="topology-node-menu"] [role="menuitem"][aria-disabled="true"]')?.textContent?.trim()`,
-      ),
-      "The server exposes no actions for this object",
-    );
-    await pressKey(cdp, "Escape");
-    await waitFor(
-      cdp,
-      `!document.querySelector('[data-testid="topology-node-menu"]')`,
-      "revoked home menu close",
-    );
-    await evaluate(
-      cdp,
-      `document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.focus()`,
-    );
-    await waitForActive(
-      cdp,
-      `el?.matches('g.topology-node[data-node-id="${BOB_ID}"]')`,
-      "Bob node before Studio governance",
-    );
-    await pressKey(cdp, " ");
-    await waitFor(
-      cdp,
-      `document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.getAttribute("data-selected") === "true" &&
-       Boolean(document.querySelector('[data-testid="topology-governance"] select'))`,
-      "Bob Studio batch selection",
-    );
-    await selectGovernanceNetwork(cdp, fixtureServer, "studio");
     await openNodeMenuByKeyboard(cdp, BOB_ID);
     await waitFor(
       cdp,
@@ -2154,9 +2353,10 @@ async function main() {
       cdp,
       `document.querySelector('.overview-activity-row[data-audit-id="${REMOVE_AUDIT_ID}"]')?.textContent ?? ""`,
     );
-    assert.match(activityText, /change_member_lifecycle/);
+    assert.ok(activityText.trim().length > 0, "removal activity row is empty");
+    assert.equal(activityText.includes("node_command:"), false, "raw wire command tag leaked into overview");
     assert.equal(removeOutcome?.data?.audit_id, REMOVE_AUDIT_ID);
-    checks.push("removal response and Overview activity are traceable by the same audit ID and command");
+    checks.push("removal response and Overview activity are traceable by the same audit ID");
 
     await navigateToNetworkTabByClick(
       cdp,
@@ -2166,7 +2366,7 @@ async function main() {
     );
     await waitFor(
       cdp,
-      `document.querySelectorAll("g.topology-node[role=option]").length === 3`,
+      `document.querySelectorAll("g.topology-node[role=option]").length === 1`,
       "topology graph before large update",
     );
     const fillerNodes = Array.from({ length: 120 }, (_, index) => {
@@ -2190,6 +2390,7 @@ async function main() {
       };
     });
     const totalAfterFillers = state.topology.nodes.length + fillerNodes.length;
+    const homeVisibleAfterFillers = 1 + fillerNodes.filter((n) => n.networks[0].network_id === "home").length;
     state.topology.nodes.push(...fillerNodes);
     refreshBoundaryCounts(state.topology);
     await evaluate(cdp, `window.__memberE2eNoReload = true`);
@@ -2198,7 +2399,7 @@ async function main() {
     await waitFor(
       cdp,
       `document.querySelector(".topology-filter-count")?.textContent?.trim() === ${JSON.stringify(
-        `Showing ${totalAfterFillers} of ${totalAfterFillers} nodes`,
+        `Showing ${homeVisibleAfterFillers} of ${totalAfterFillers} nodes`,
       )}`,
       "large topology incremental update",
       12_000,

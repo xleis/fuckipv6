@@ -1010,6 +1010,31 @@ wait_for_network_revision() {
     return 1
 }
 
+# The first candidate configuration is the credential-free bootstrap write the
+# Coordinator accepts before any term exists. Publishing the owner declaration
+# then makes that candidate healthy, which is the Coordinator's own gate for
+# membership governance. Without this step a brand-new network stays frozen.
+bootstrap_coordinator_governance() {
+    local socket_path=$1 network=$2 owner_node=$3
+    local endpoint="10.79.1.1:$HOST_PORT"
+    local now_ms expires_ms command
+    now_ms=$(date +%s%3N)
+    expires_ms=$((now_ms + 3600000))
+    command=$(jq -cn --arg n "$network" --arg id "$owner_node" --argjson exp "$expires_ms" \
+        '{command:"update_coordinator_candidates",payload:{network_name:$n,expected_revision:0,candidates:[{node_id:$id,priority:10}],expires_at_unix_ms:$exp}}')
+    if ! ipc_command "$socket_path" "$command" >"$WORK/bootstrap-candidates.json" 2>"$WORK/bootstrap-candidates.err"; then
+        sed -e 's/\x1b\[[0-9;]*m//g' "$WORK/bootstrap-candidates.err" >&2 || true
+        fail "bootstrap candidate configuration was rejected"
+    fi
+    command=$(jq -cn --arg n "$network" --arg endpoint "$endpoint" \
+        '{command:"publish_coordinator_candidate_declaration",payload:{network_name:$n,willingness:"willing",public_reachability:{public_endpoint:$endpoint,reachable_via_relay:true},resources:{cpu_cores:1,memory_bytes:268435456,max_connections:64},validity_ms:600000}}')
+    if ! ipc_command "$socket_path" "$command" >"$WORK/bootstrap-declaration.json" 2>"$WORK/bootstrap-declaration.err"; then
+        sed -e 's/\x1b\[[0-9;]*m//g' "$WORK/bootstrap-declaration.err" >&2 || true
+        fail "bootstrap candidate declaration was rejected"
+    fi
+    info "bootstrap governance: candidate revision 1 and owner declaration published"
+}
+
 set_network_file_capability() {
     local expected=$1 label=$2 capabilities old_revision command
     if [ "$expected" = yes ]; then
@@ -1076,8 +1101,21 @@ assert_share_staging_empty() {
 }
 
 build_blake3_helper() {
-    local blake3_rlib
-    blake3_rlib=$(find "$ROOT/target/release/deps" -maxdepth 1 -name 'libblake3-*.rlib' -print -quit)
+    local blake3_rlib=""
+    local -a dep_flags=()
+    if [ -d "$ROOT/target/release/deps" ]; then
+        blake3_rlib=$(find "$ROOT/target/release/deps" -maxdepth 1 -name 'libblake3-*.rlib' -print -quit)
+        dep_flags=(-L "dependency=$ROOT/target/release/deps")
+    fi
+    if [ -z "$blake3_rlib" ] && [ -d "$ROOT/target/release/build" ]; then
+        blake3_rlib=$(find "$ROOT/target/release/build/blake3" -maxdepth 3 -name 'libblake3-*.rlib' -print -quit 2>/dev/null || true)
+        if [ -n "$blake3_rlib" ]; then
+            local out_dir
+            while IFS= read -r out_dir; do
+                dep_flags+=(-L "dependency=$out_dir")
+            done < <(find "$ROOT/target/release/build" -maxdepth 3 -type d -name out | sort)
+        fi
+    fi
     [ -n "$blake3_rlib" ] || fail "missing release blake3 rlib"
     cat >"$WORK/blake3sum.rs" <<'RS'
 use std::env;
@@ -1100,7 +1138,7 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 RS
-    rustc --edition=2021 -L dependency="$ROOT/target/release/deps" \
+    rustc --edition=2021 "${dep_flags[@]}" \
         --extern blake3="$blake3_rlib" "$WORK/blake3sum.rs" -o "$WORK/blake3sum"
 }
 
@@ -1211,6 +1249,7 @@ SH
     HOST_NODE_PID=$(wait_for_ready_node_pid "$WORK/host/host.log" 60) \
         || fail "Coordinator node readiness PID was not reported"
     info "network_id=$NETWORK_ID owner=$HOST_NODE_ID join_mode=invite_only"
+    bootstrap_coordinator_governance "$HOST_SOCK" "$NETWORK" "$HOST_NODE_ID"
 
     # Invitation capability policy is checked against the current signed network
     # profile at issuance time, so File must be declared before accepting members.

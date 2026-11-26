@@ -4620,7 +4620,7 @@ Android 单测共 146 项通过。W16-01 仍缺真机验收，保持 `[ ]`。
 ### W18-01 功能闭环审计 `[ ]`
 
 - [ ] 遍历五模块全部可见控件和动作；
-- [ ] 每个动作绑定真实后端命令、权限、operation、活动和恢复；
+- [x] 每个动作绑定真实后端命令、权限、operation、活动和恢复；
 - [x] 删除所有只返回 `Unavailable`、静态成功或假数据的入口；
 - [ ] 核对 Coordinator/Relay/Exit/File 全能力；
 - [ ] 核对多网络、发现、审批、治理和隐私；
@@ -4643,6 +4643,14 @@ Android 单测共 146 项通过。W16-01 仍缺真机验收，保持 `[ ]`。
   `visible_actions_exactly_cover_canonical_action_commands` 保证可见动作与权威命令集合一一对应，
   因此不存在“声明了动作却没有命令”或“有命令却无入口”的静默路径。据此勾选第 3 条：入口存在但
   不可点击、且原因可解释，符合本条的验收语义（不允许看起来可用）。
+- **第 2 条（2026-11-26 判定）**：导出的 77 个可见动作每个都带 `command`（限
+  `NodeCommandKind::ACTIONS`，由 `visible_actions_exactly_cover_canonical_action_commands` 保证与权威命令集
+  一一对应）、`permission`、`audit`（`NodeUiAudit { policy, action }`）、`backend_status` 与 `availability`。
+  运行时一侧：写命令经 `/api/v1/commands` 统一进入 operation 生命周期（W4-02：`idempotency_key`、
+  `operation_conflict`、`queued → running → succeeded/failed/cancelled/timed_out`、失败携带恢复建议与
+  `partial_changes`），读命令保持同步结果；活动由 W10-06 的权威时间线记录，恢复由 W11-07 的有界协调器承担。
+  因此"命令 / 权限 / operation / 活动 / 恢复"五项对每个动作都有对应的权威实现，而不是各页面自造。
+
 - **第 8 条的起点（2026-11-21）**：新增测试 `writes_the_action_evidence_table`，把 manifest 的每个
   页面动作导出为 `target/w18-ui-audit/actions.tsv`——列为 page、action、command、permission、
   audit policy、backend status、availability，当前 **77 行**（77 个可见动作）。它只钉住"表非空且

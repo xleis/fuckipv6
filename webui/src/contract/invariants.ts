@@ -60,6 +60,7 @@ import {
   CAPABILITY_KIND_VALUES,
   EXIT_CONTRIBUTION_MODE_VALUES,
   EXIT_CONTRIBUTION_OBLIGATION_VALUES,
+  EXIT_CONTRIBUTION_SCOPE_VALUES,
   MEMBERSHIP_ROLE_VALUES,
   MEMBER_LIFECYCLE_ACTION_VALUES,
   MEMBER_LIFECYCLE_STATUS_VALUES,
@@ -93,6 +94,7 @@ import {
   TRAFFIC_PROTECTION_STATE_VALUES,
   TRAFFIC_SESSION_EVENT_KIND_VALUES,
   TUN_CAPABILITY_REASON_VALUES,
+  TUN_PLATFORM_VALUES,
 } from "../../../contracts/typescript/node-contract-v1";
 
 import { ContractError } from "../api/client";
@@ -350,12 +352,8 @@ function canonicalExitContribution(
 
 const EXIT_CONTRIBUTION_OBLIGATIONS = new Set<string>(EXIT_CONTRIBUTION_OBLIGATION_VALUES);
 const EXIT_CONTRIBUTION_MODES = new Set<string>(EXIT_CONTRIBUTION_MODE_VALUES);
-const EXIT_CONTRIBUTION_SCOPES = new Set([
-  "not_applicable",
-  "joining_members",
-  "all_members",
-]);
-const TUN_PLATFORMS = new Set(["linux", "macos", "windows", "other"]);
+const EXIT_CONTRIBUTION_SCOPES = new Set<string>(EXIT_CONTRIBUTION_SCOPE_VALUES);
+const TUN_PLATFORMS = new Set<string>(TUN_PLATFORM_VALUES);
 const TUN_CAPABILITY_REASONS = new Set<string>(TUN_CAPABILITY_REASON_VALUES);
 
 const POLICY_OBJECT_KINDS = new Set<string>(POLICY_OBJECT_KIND_VALUES);

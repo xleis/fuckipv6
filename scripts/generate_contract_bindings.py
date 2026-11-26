@@ -206,12 +206,25 @@ class TypeScriptGenerator:
             if not isinstance(values, list) or not values:
                 # `schemars` renders a documented enum as oneOf of const values,
                 # which is the same information in a different shape.
+                # A documented enum may also be a union of `const` variants and
+                # single-value `enum` variants (serde renders both in one oneOf).
                 one_of = definition.get("oneOf")
-                if isinstance(one_of, list) and one_of and all(
-                    isinstance(candidate, dict) and "const" in candidate
-                    for candidate in one_of
-                ):
-                    values = [candidate["const"] for candidate in one_of]
+                collected: list[Any] = []
+                usable = isinstance(one_of, list) and bool(one_of)
+                if usable:
+                    for candidate in one_of:  # type: ignore[union-attr]
+                        if not isinstance(candidate, dict):
+                            usable = False
+                            break
+                        if "const" in candidate:
+                            collected.append(candidate["const"])
+                        elif isinstance(candidate.get("enum"), list):
+                            collected.extend(candidate["enum"])
+                        else:
+                            usable = False
+                            break
+                if usable and collected:
+                    values = collected
                 else:
                     continue
             constant = re.sub(r"(?<!^)(?=[A-Z])", "_", name).upper() + "_VALUES"

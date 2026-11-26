@@ -274,6 +274,19 @@ jobs:
       - name: Keyboard and touch walk over the topology surface
         run: xvfb-run -a node webui/scripts/topology-keyboard-e2e.mjs
 
+      - name: Member governance and multi-network topology E2E
+        run: xvfb-run -a node webui/scripts/topology-member-e2e.mjs --skip-build
+
+      - name: Upload topology E2E reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: topology-e2e-reports
+          path: |
+            target/topology-keyboard-e2e/report.json
+            target/topology-member-e2e/report.json
+          if-no-files-found: warn
+
       - name: Upload visual regression artifacts
         if: always()
         uses: actions/upload-artifact@v4

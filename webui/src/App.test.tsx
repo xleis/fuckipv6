@@ -1042,6 +1042,11 @@ describe("React WebUI shell", () => {
     expect(tun).toHaveTextContent(
       "translated:runtime.value.tun_reason.device_unavailable",
     );
+    // Linux is the only platform with device evidence, so its snapshot must not carry the
+    // "not verified on device" marker.
+    expect(
+      within(tun).queryByTestId("tun-unverified-platform"),
+    ).not.toBeInTheDocument();
   });
 
   it("renders a fixed, sanitized diagnostic report with explicit recovery impact", async () => {

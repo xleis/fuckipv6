@@ -1131,7 +1131,7 @@ async function main() {
     await waitFor(
       cdp,
       `document.querySelector(".topology-view[data-view='list']") &&
-       Number(document.querySelector(".topology-list-table table")?.getAttribute("aria-rowcount")) === ${"${rowCountBeforeReconnect - 1}"}`,
+       Number(document.querySelector(".topology-list-table table")?.getAttribute("aria-rowcount")) === ${rowCountBeforeReconnect - 1}`,
       "authoritative resync after reconnect removes a stale node",
       10_000,
     );

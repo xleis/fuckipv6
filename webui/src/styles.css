@@ -2003,6 +2003,15 @@ button:disabled {
 .detail-list dt {
   color: var(--text-muted);
 }
+.tun-unverified-platform {
+  margin-left: 0.5rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 0.4rem;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  font-size: 0.75em;
+  letter-spacing: 0.01em;
+}
+
 .detail-list dd {
   min-width: 0;
   margin: 0;

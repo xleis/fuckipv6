@@ -2131,7 +2131,19 @@ function NodeRuntime({
         <dl className="detail-list">
           <div>
             <dt>{label(locale, "runtime.row.tun_platform")}</dt>
-            <dd>{tunPlatform}</dd>
+            <dd>
+              {tunPlatform}
+              {/* Only Linux has device evidence so far; say so instead of implying the
+                  capability is equally proven everywhere. */}
+              {tunCapabilities && tunCapabilities.platform !== "linux" ? (
+                <small
+                  className="tun-unverified-platform"
+                  data-testid="tun-unverified-platform"
+                >
+                  {label(locale, "runtime.value.tun_unverified_platform")}
+                </small>
+              ) : null}
+            </dd>
           </div>
           <div>
             <dt>{label(locale, "runtime.row.tun_supported")}</dt>

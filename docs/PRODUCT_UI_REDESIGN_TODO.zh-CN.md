@@ -5140,7 +5140,7 @@ runtime dir），不是环境变量，因此 unset 变量并不能伪造无头�
 ### W18-10 可复现构建与发布产物 `[ ]`
 
 - [x] 干净工作区从锁定依赖构建；
-- [ ] 构建工具链和 feature 列表固定；
+- [x] 构建工具链和 feature 列表固定；
 - [ ] 产物签名、校验和与来源证明；
 - [ ] WebUI/Android 资产哈希记录；
 - [x] SBOM/许可证清单；
@@ -5166,8 +5166,12 @@ GitHub/OpenSSH/AWS/Slack token 形态，以及仓库根 `client_key.pem` 的实�
 `coordinator.toml` 本身**未被 Git 跟踪**（在 `.gitignore` 内），因此风险只来自误嵌入，而扫描正是针对这一点；
 Coordinator 旧 WebUI 里出现 `client_key.pem` 字样是 HTML 示例文本，不是凭据，故未列入模式。
 
-其余四条不勾（第 4 条只完成一半），缺口逐条列出：**第 2 条**工作流用 `dtolnay/rust-toolchain@stable`，stable 不 pin 具体版本，
-不满足"工具链固定"；**第 3 条**脚本自述"does not sign artifacts or produce a SLSA attestation"，
+**第 2 条（2026-11-26 补）**：Verify 与 Release 两个工作流里的 `dtolnay/rust-toolchain@stable` 全部改为
+`@1.100.0`（Verify 9 处、Release 3 处），与本机 `rustc 1.100.0 (0ef1bc386 2026-11-09)` 一致；feature 列表
+由各 crate 的 `[features]` 与 `--all-features`/`--no-default-features` 组合固定，并由
+`scripts/check-feature-matrix.sh` 逐组验证。pin 之后 stable 通道的后续变动不会再悄悄改变发布产物的编译器。
+
+其余三条不勾（第 4 条只完成一半），缺口逐条列出：**第 3 条**脚本自述"does not sign artifacts or produce a SLSA attestation"，
 只有校验和与未签名 provenance；**第 4 条**（2026-11-21 补了一半）新增 `scripts/record-webui-assets.sh`，对
 `crates/client/src/webui/dist` 逐文件生成排序后的 sha256 清单（当前 5 个文件：
 `index.html`、`assets/app.css`、`assets/app.js` 与两个 worker），三条 package job 都会记录；

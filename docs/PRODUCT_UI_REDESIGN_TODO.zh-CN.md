@@ -5151,7 +5151,7 @@ runtime dir），不是环境变量，因此 unset 变量并不能伪造无头�
 
 - [x] 干净工作区从锁定依赖构建；
 - [x] 构建工具链和 feature 列表固定；
-- [ ] 产物签名、校验和与来源证明；
+- [x] 产物签名、校验和与来源证明；
 - [x] WebUI/Android 资产哈希记录；
 - [x] SBOM/许可证清单；
 - [ ] 发布说明列出能力、限制和迁移；
@@ -5181,8 +5181,11 @@ Coordinator 旧 WebUI 里出现 `client_key.pem` 字样是 HTML 示例文本，�
 由各 crate 的 `[features]` 与 `--all-features`/`--no-default-features` 组合固定，并由
 `scripts/check-feature-matrix.sh` 逐组验证。pin 之后 stable 通道的后续变动不会再悄悄改变发布产物的编译器。
 
-其余三条不勾（第 4 条只完成一半），缺口逐条列出：**第 3 条**脚本自述"does not sign artifacts or produce a SLSA attestation"，
-只有校验和与未签名 provenance；**第 4 条**（2026-11-21 补了一半）新增 `scripts/record-webui-assets.sh`，对
+其余三条不勾（第 4 条只完成一半），缺口逐条列出：**第 3 条（2026-11-26 补）**：三条 package job 在生成 SBOM/校验和之后新增 sigstore **keyless**
+签名——`cosign sign-blob` 用 workflow 的 OIDC 身份签发，产出 `dist/<package>.sig` 与
+`.pem` 证书；job 级权限显式加了 `id-token: write`（workflow 级仍是 `contents: write`，没有扩大）。
+签名 + SHA256 + provenance 三者齐备，本条勾选。边界：这是 blob 签名，**不是** SLSA attestation，
+脚本里那句"does not produce a SLSA attestation"仍然成立——SLSA 生成器是另一件事，归到发布硬化；**第 4 条**（2026-11-21 补了一半）新增 `scripts/record-webui-assets.sh`，对
 `crates/client/src/webui/dist` 逐文件生成排序后的 sha256 清单（当前 5 个文件：
 `index.html`、`assets/app.css`、`assets/app.js` 与两个 worker），三条 package job 都会记录；
 Android 侧也已补齐：`android` gate 在 `assembleDebug` 之后用

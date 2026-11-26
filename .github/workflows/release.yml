@@ -26,6 +26,9 @@ jobs:
     name: Linux x86_64 package
     needs: verify
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -93,6 +96,22 @@ jobs:
             --platform linux \
             --release-version "${version}"
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: v2.4.1
+
+      - name: Sign the artifact (keyless)
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          package="fuckipv6-linux-x86_64-${version}"
+          cosign sign-blob --yes \
+            --output-signature "dist/${package}.sig" \
+            --output-certificate "dist/${package}.pem" \
+            "dist/${package}.tar.gz"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -107,6 +126,9 @@ jobs:
     name: Windows x86_64 package
     needs: verify
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -168,6 +190,22 @@ jobs:
             --platform windows \
             --release-version "${version}"
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: v2.4.1
+
+      - name: Sign the artifact (keyless)
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          package="fuckipv6-windows-x86_64-${version}"
+          cosign sign-blob --yes \
+            --output-signature "dist/${package}.sig" \
+            --output-certificate "dist/${package}.pem" \
+            "dist/${package}.tar.gz"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -190,6 +228,9 @@ jobs:
             target: x86_64-apple-darwin
           - arch: arm64
             target: aarch64-apple-darwin
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -248,6 +289,22 @@ jobs:
             --target "${{ matrix.target }}" \
             --platform "macos-${{ matrix.arch }}" \
             --release-version "${version}"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: v2.4.1
+
+      - name: Sign the artifact (keyless)
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          package="fuckipv6-macos-${{ matrix.arch }}-${version}"
+          cosign sign-blob --yes \
+            --output-signature "dist/${package}.sig" \
+            --output-certificate "dist/${package}.pem" \
+            "dist/${package}.tar.gz"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

@@ -62,6 +62,16 @@ jobs:
           cp scripts/install-node.sh scripts/fuckipv6.service "dist/${package}/scripts/"
           tar -C dist -czf "dist/${package}.tar.gz" "${package}"
 
+      - name: Generate release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          python3 scripts/release-notes.py \
+            --version "${version}" \
+            --output "dist/fuckipv6-linux-x86_64-${version}/RELEASE_NOTES.md" \
+            --toolchain "rustc 1.100.0"
+
       - name: Record WebUI asset hashes
         shell: bash
         run: ./scripts/record-webui-assets.sh

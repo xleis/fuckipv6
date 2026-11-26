@@ -5177,8 +5177,11 @@ Coordinator 旧 WebUI 里出现 `client_key.pem` 字样是 HTML 示例文本，�
 `index.html`、`assets/app.css`、`assets/app.js` 与两个 worker），三条 package job 都会记录；
 Android 侧也已补齐：`android` gate 在 `assembleDebug` 之后用
 `find app/build/outputs/apk -name '*.apk'` 定位产物、写出 `target/android-assets/apk.sha256` 并作为
-artifact 上传，找不到 APK 时直接失败。两端资产哈希因此都有记录，本条勾选。**第 6 条**发布说明停留在 CHANGELOG 的自由文本，没有"能力/限制/迁移"
-结构化清单。
+artifact 上传，找不到 APK 时直接失败。两端资产哈希因此都有记录，本条勾选。**第 6 条（机制就绪，未勾）**：新增 `docs/RELEASE_NOTES_TEMPLATE.md`（能力 / 限制 / 迁移三节）
+与 `scripts/release-notes.py`——后者把版本号、commit、工具链填入模板，并把 CHANGELOG 里该版本的段落
+放进"能力"节；**只要模板里还有未填写的节就直接失败**（`--allow-placeholder-migration` 只用于出草稿），
+避免发布说明停留在"看起来写了"。三个 package job 在打包后生成 `RELEASE_NOTES.md` 进分发目录。
+本条仍不勾：机制有了，但首次真实发布时"限制"与"迁移"两节仍需人填写，当前没有任何一份填写完成的说明。
 
 ### W18-11 发布阻断逐项签核 `[ ]`
 

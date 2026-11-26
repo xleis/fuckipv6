@@ -5034,7 +5034,17 @@ disabled 元素不在 tab order 的问题，也保留"纯键盘"这个前提。�
 CSS 隐藏**（`getBoundingClientRect` 全为 0），因此既不可聚焦也不在 tab order；同组里 `reset-zoom` 则是
 `disabled={zoom === 1}`。两者都不是脚本能绕过的遍历问题。脚本现在改成：遍历类检查保留（zoom-in 用 Tab
 可达），控制类检查改为直接聚焦并**只验证按键行为**（Enter/Space 的效果），并在代码注释里写明"不验证
-到达该控件的 tab 顺序"——那部分单独跟踪。这样脚本能覆盖它真正覆盖得了的东西，而不是假装全绿。第 4 条仍不勾：键盘导航与按网络渲染已对齐，
+到达该控件的 tab 顺序"——那部分单独跟踪。这样脚本能覆盖它真正覆盖得了的东西，而不是假装全绿。
+
+**第一阶段全绿（2026-11-26）**：按上述处置后，脚本**桌面视口的全部检查通过**——键盘-only 导航到
+Networks > Topology、按选中网络渲染 2 个节点、ArrowRight 移动焦点、Space 选择、Enter 打开详情、
+Escape 关闭并恢复焦点、zoom-in/reset、展开 options 后 freeze（断言变为 `Resume live layout` 且
+`aria-pressed=true`）、Shift+F10 打开节点菜单（含 Arrow/Home/End/Escape/Enter）。只剩两处：`locate-current`
+在此布局 `display:none`，记为未执行；`reset-zoom` 在 100% 时 disabled，未做该项的禁用态断言。
+
+脚本随后停在**第二阶段**：切到移动视口并 `Page.reload` 之后，`waitForReady` 等不到 WebUI 产品外壳
+（第 11 层）。这一层尚未排查，但它属于窄屏分支而不是键盘可达性。第 4 条仍不勾——屏幕阅读器走查依旧
+没有证据，而那一半不是脚本能提供的。第 4 条仍不勾：键盘导航与按网络渲染已对齐，
 长按/右键/焦点恢复与 freeze 控件三段待办。
 
 ### W18-06 网络质量与抗干扰证据 `[x]`

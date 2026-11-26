@@ -430,6 +430,23 @@ jobs:
           ./gradlew --console=plain --no-daemon
           :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
 
+      - name: Record the debug APK hash
+        working-directory: android
+        run: |
+          set -euo pipefail
+          apk=$(find app/build/outputs/apk -name '*.apk' -print -quit)
+          if [ -z "$apk" ]; then echo "no APK produced" >&2; exit 1; fi
+          mkdir -p "$GITHUB_WORKSPACE/target/android-assets"
+          sha256sum "$apk" > "$GITHUB_WORKSPACE/target/android-assets/apk.sha256"
+          cat "$GITHUB_WORKSPACE/target/android-assets/apk.sha256"
+
+      - name: Upload the APK hash
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-assets
+          path: target/android-assets
+          if-no-files-found: warn
+
       - name: Upload test and lint reports
         if: always()
         uses: actions/upload-artifact@v4

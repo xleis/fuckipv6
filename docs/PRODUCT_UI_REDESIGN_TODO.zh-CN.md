@@ -5142,7 +5142,7 @@ runtime dir），不是环境变量，因此 unset 变量并不能伪造无头�
 - [x] 干净工作区从锁定依赖构建；
 - [x] 构建工具链和 feature 列表固定；
 - [ ] 产物签名、校验和与来源证明；
-- [ ] WebUI/Android 资产哈希记录；
+- [x] WebUI/Android 资产哈希记录；
 - [x] SBOM/许可证清单；
 - [ ] 发布说明列出能力、限制和迁移；
 - [x] 二进制不包含测试秘密或开发凭据；
@@ -5175,7 +5175,9 @@ Coordinator 旧 WebUI 里出现 `client_key.pem` 字样是 HTML 示例文本，�
 只有校验和与未签名 provenance；**第 4 条**（2026-11-21 补了一半）新增 `scripts/record-webui-assets.sh`，对
 `crates/client/src/webui/dist` 逐文件生成排序后的 sha256 清单（当前 5 个文件：
 `index.html`、`assets/app.css`、`assets/app.js` 与两个 worker），三条 package job 都会记录；
-Android 侧的 APK/AAB 哈希仍缺，因此本条不勾；**第 6 条**发布说明停留在 CHANGELOG 的自由文本，没有"能力/限制/迁移"
+Android 侧也已补齐：`android` gate 在 `assembleDebug` 之后用
+`find app/build/outputs/apk -name '*.apk'` 定位产物、写出 `target/android-assets/apk.sha256` 并作为
+artifact 上传，找不到 APK 时直接失败。两端资产哈希因此都有记录，本条勾选。**第 6 条**发布说明停留在 CHANGELOG 的自由文本，没有"能力/限制/迁移"
 结构化清单。
 
 ### W18-11 发布阻断逐项签核 `[ ]`

@@ -811,6 +811,20 @@ async function main() {
       `document.querySelector('[data-testid="topology-zoom-status"]')?.textContent?.trim() === "100%"`,
       "zoom status reset to 100 percent",
     );
+    await tabTo(
+      cdp,
+      `el?.matches('button[aria-label="Locate current node"]')`,
+      "locate-current control",
+    );
+    await pressKey(cdp, "Enter");
+    await waitForActive(
+      cdp,
+      `el?.matches('g.topology-node[data-node-id="${SELF_ID}"]')`,
+      "current node after keyboard locate",
+    );
+    // locate-current is the last control before the disclosure in DOM order, so the
+    // keyboard walk must take it first and only then open the options panel: tabbing
+    // forward from inside a panel can never reach back to an earlier element.
     // The layout controls live inside a collapsed <details class="topology-options">,
     // so the disclosure must be opened with the keyboard first.
     await tabTo(
@@ -836,17 +850,6 @@ async function main() {
       cdp,
       `[...document.querySelectorAll("button")].some((button) => (button.textContent || "").trim() === "Resume live layout" && button.getAttribute("aria-pressed") === "true")`,
       "frozen topology state",
-    );
-    await tabTo(
-      cdp,
-      `el?.matches('button[aria-label="Locate current node"]')`,
-      "locate-current control",
-    );
-    await pressKey(cdp, "Enter");
-    await waitForActive(
-      cdp,
-      `el?.matches('g.topology-node[data-node-id="${SELF_ID}"]')`,
-      "current node after keyboard locate",
     );
     checks.push("zoom, reset, freeze and locate-current work with keyboard only");
 

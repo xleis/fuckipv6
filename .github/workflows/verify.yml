@@ -260,6 +260,17 @@ jobs:
       - name: Compare GPUI and WebUI
         run: xvfb-run -a npm run visual:regression --prefix webui
 
+      - name: End-to-end workflows in a real browser
+        run: xvfb-run -a npm run e2e --prefix webui
+
+      - name: Upload end-to-end report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webui-e2e
+          path: target/e2e-webui/report.json
+          if-no-files-found: warn
+
       - name: Upload visual regression artifacts
         if: always()
         uses: actions/upload-artifact@v4

@@ -11,7 +11,8 @@
     "test": "vitest",
     "visual:snapshot": "node scripts/visual-snapshot.mjs",
     "visual:regression": "node scripts/visual-regression.mjs",
-    "visual:topology-baseline": "node scripts/topology-visual-baseline.mjs"
+    "visual:topology-baseline": "node scripts/topology-visual-baseline.mjs",
+    "e2e": "node scripts/e2e-workflows.mjs"
   },
   "dependencies": {
     "@radix-ui/react-context-menu": "^2.2.16",

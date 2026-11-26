@@ -4797,6 +4797,15 @@ node 进程**，那个孙进程仍持有管道写端，EOF 永不到来。现在
 
 ### W18-03 前端质量门禁 `[ ]`
 
+**补充（2026-11-26，真实浏览器 E2E）**：新增 `webui/scripts/e2e-workflows.mjs`（`npm run e2e --prefix webui`），用
+**Chrome DevTools 协议**驱动真实浏览器渲染真实构建产物 + 契约夹具，覆盖 21 项检查：外壳渲染、5 个模块逐个点击并核对
+`#page-title` 文案、每步 `aria-current=page` 选中态、`document.lang`、图标按钮必须有可读标签、Tab 键进入外壳焦点域，以及
+**任何 console error 即失败**；报告写入 `target/e2e-webui/report.json`，已接入 `verify.yml` 的 visual-regression job（含 artifact 上传）。
+
+边界必须写明：这是 CDP 驱动，**不是 Playwright**——仓库没有 Playwright 依赖，本机离线也无法安装浏览器。因此
+"Playwright E2E 通过"一条仍不勾选（工具名不符），但"有真实浏览器 E2E 门禁"这一实质已具备。可访问性一条同样保持未勾：
+自动化断言（标签、焦点、语义区域）已覆盖，屏幕阅读器人工走查仍无证据。
+
 - [x] TypeScript 严格类型检查通过；
 - [x] ESLint/等价 Lint 通过；
 - [x] 单元测试和组件测试通过；

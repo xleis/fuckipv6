@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { readFile, mkdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -354,6 +354,7 @@ async function comparePage(page, paths) {
         chrome: webuiMetadata.chrome,
       },
     },
+    source: sourceRevision(),
     artifacts: {
       gpui: paths.gpuiImage,
       webui: paths.webuiImage,
@@ -363,6 +364,18 @@ async function comparePage(page, paths) {
   };
   await writeFile(paths.report, `${JSON.stringify(report, null, 2)}\n`);
   return report;
+}
+
+function sourceRevision() {
+  try {
+    const options = { encoding: "utf8", cwd: REPO_ROOT };
+    const commit = execFileSync("git", ["rev-parse", "HEAD"], options).trim();
+    const dirty =
+      execFileSync("git", ["status", "--porcelain"], options).trim().length > 0;
+    return { commit, dirty };
+  } catch (error) {
+    return { commit: "unknown", dirty: null, error: String(error?.message ?? error) };
+  }
 }
 
 async function main() {

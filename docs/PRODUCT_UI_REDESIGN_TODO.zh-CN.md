@@ -5249,9 +5249,17 @@ Android 前台服务未实现）；第 5 条的 TUN 残留问题仍有 2026-11-1
 与虚拟路由；对 node 进程 `SIGKILL` 后 TUN 按预期残留，但控制面在 1 秒内重启 node 并记录
 `检测到崩溃残留的 TUN 网卡，正在安全接管并重建` / `已替换崩溃残留的 TUN 网卡`，**操作者不需要手工
 `ip link del`**；同一 runtime 目录启动第二个 `host` 被 `Conflict` 拒绝，`control.lock`/`node.lock` 仍只记录
-单一持有者。这两条此前只有 2026-11-16 的事故记录，现在有可复现实测。第 6 条仍不勾：W11-07 的 10 秒
-deadline 与 W12-05 的切换超时只覆盖各自路径，"所有失败都有硬超时"是全称判断；第 4 条仍缺系统重启
-实测（依赖 W2-08 的服务管理器在目标发行版上验证）。
+单一持有者。这两条此前只有 2026-11-16 的事故记录，现在有可复现实测。
+
+**第 4 条的检查清单（2026-11-26，代码侧已核，实测待做）**：`scripts/fuckipv6.service` 已具备"重启后按
+配置恢复"所需的服务语义——`After/Wants=network-online.target`、`StartLimitIntervalSec=30s` +
+`StartLimitBurst=3`（避免崩溃风暴）、`Restart=on-failure` + `RestartSec=5s`、`KillMode=mixed`、
+`TimeoutStopSec=75s`，以及固定的 `FUCKIPV6_RUNTIME_DIR=/run/fuckipv6` 与 `UMask=0077`。客户端侧
+`runtime_process.rs` 在 control 启动时会**接管仍存活的 node**（`child.is_none() && !adopted_node`
+分支里的 `接管现有节点进程`）并进入稳态监督。缺的是最后一次实测：在目标发行版上 `systemctl restart`
+与真机重启后，验证 node 是否按 `service.json` 恢复成员关系、TUN/路由/DNS 是否重建、以及
+`StartLimitBurst` 触发时是否留下可见失败而不是静默循环。本机做不了：sudo 被 `no_new_privs` 阻断，
+无法操作 systemd。
 
 这张表本身仍不足以勾第 8 条："长时"一行已于 2026-11-26 移出验收范围，不能充当"全套"证据。
 

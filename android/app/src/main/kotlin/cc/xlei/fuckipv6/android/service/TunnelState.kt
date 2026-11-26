@@ -1,5 +1,9 @@
 package cc.xlei.fuckipv6.android.service
 
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+
 /**
  * Tunnel lifecycle the Android side may claim.
  *
@@ -68,6 +72,14 @@ object TunnelTransitions {
 
 /** Process-local state holder the UI observes; it never persists across restarts. */
 object TunnelStateStore {
+    /**
+     * Observable projection of [state]. The service mutates the volatile field
+     * from a platform callback and the UI observes this flow; without it the
+     * screen could only ever show the value it read at composition time.
+     */
+    private val flow = MutableStateFlow<TunnelState>(TunnelState.Stopped)
+    val updates: StateFlow<TunnelState> get() = flow.asStateFlow()
+
     @Volatile
     var state: TunnelState = TunnelState.Stopped
         private set
@@ -75,10 +87,12 @@ object TunnelStateStore {
     fun apply(requested: TunnelState): TunnelState {
         val next = TunnelTransitions.next(state, requested) ?: state
         state = next
+        flow.value = next
         return next
     }
 
     fun reset() {
         state = TunnelState.Stopped
+        flow.value = TunnelState.Stopped
     }
 }

@@ -72,4 +72,19 @@ class TunnelStateTest {
         assertFalse(TunnelActions.isKnown(null))
         assertFalse(TunnelActions.isKnown("cc.xlei.fuckipv6.android.SOMETHING"))
     }
+
+    @Test
+    fun theObservableFlowMirrorsEveryTransition() {
+        TunnelStateStore.reset()
+        assertEquals(TunnelState.Stopped, TunnelStateStore.updates.value)
+        TunnelStateStore.apply(TunnelState.Preparing)
+        assertEquals(TunnelState.Preparing, TunnelStateStore.updates.value)
+        TunnelStateStore.apply(TunnelState.Running)
+        assertEquals(TunnelState.Running, TunnelStateStore.updates.value)
+        // A refused transition must not move the observable value either.
+        TunnelStateStore.apply(TunnelState.Preparing)
+        assertEquals(TunnelState.Running, TunnelStateStore.updates.value)
+        TunnelStateStore.apply(TunnelState.Stopped)
+        assertEquals(TunnelState.Stopped, TunnelStateStore.updates.value)
+    }
 }

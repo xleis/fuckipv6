@@ -1072,6 +1072,10 @@
       "choice.permission.view_logs": "查看日志",
       "overview.row.runtime_status": "运行状态",
       "overview.row.networks": "网络",
+      "overview.metric.peers": "对等节点",
+      "overview.environment": "运行环境",
+      "overview.onboarding.title": "还没有网络",
+      "overview.onboarding.body": "创建你自己的网络，或从发现索引加入一个已有网络。加入后，这里会显示连接状态、流量保护与最近活动。",
       "overview.row.last_error": "最近错误",
       "overview.runtime_status": "{status} · {detail}",
       "overview.network_counts": "{networks} 个网络 · {peers} 个 Peer",
@@ -3381,7 +3385,9 @@
       "exit.action.disable": "关闭本机 Exit",
       "onboarding.configure.detail": "填入节点地址（本机节点通常是 http://127.0.0.1:7788）与访问令牌后连接。",
       "onboarding.action.connect": "连接节点",
-      "onboarding.token_note": "令牌只保存在本机，不会同步到任何其他位置。"
+      "onboarding.token_note": "令牌只保存在本机，不会同步到任何其他位置。",
+      "tunnel.action.start": "启动隧道",
+      "tunnel.action.stop": "停止隧道"
     },
     "en": {
       "nav.overview": "Overview",
@@ -4453,6 +4459,10 @@
       "choice.permission.view_logs": "View logs",
       "overview.row.runtime_status": "Runtime status",
       "overview.row.networks": "Networks",
+      "overview.metric.peers": "Peers",
+      "overview.environment": "Runtime environment",
+      "overview.onboarding.title": "No networks yet",
+      "overview.onboarding.body": "Create your own network, or join one from the discovery index. Connection state, traffic protection, and recent activity appear here once you join.",
       "overview.row.last_error": "Latest error",
       "overview.runtime_status": "{status} · {detail}",
       "overview.network_counts": "{networks} networks · {peers} peers",
@@ -6762,7 +6772,9 @@
       "exit.action.disable": "Disable local Exit",
       "onboarding.configure.detail": "Enter the node address (a local node is usually http://127.0.0.1:7788) and the access token, then connect.",
       "onboarding.action.connect": "Connect",
-      "onboarding.token_note": "The token stays on this device and is never synced anywhere else."
+      "onboarding.token_note": "The token stays on this device and is never synced anywhere else.",
+      "tunnel.action.start": "Start tunnel",
+      "tunnel.action.stop": "Stop tunnel"
     }
   }
 }

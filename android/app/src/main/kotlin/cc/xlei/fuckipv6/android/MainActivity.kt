@@ -1,11 +1,13 @@
 package cc.xlei.fuckipv6.android
 
+import android.app.Activity
 import android.content.Intent
 import android.graphics.Color
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.core.content.ContextCompat
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
@@ -22,6 +24,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 import cc.xlei.fuckipv6.android.bridge.AdminRecoverySurface
+import cc.xlei.fuckipv6.android.service.TunnelTransports
+import cc.xlei.fuckipv6.android.service.TunnelStateStore
+import cc.xlei.fuckipv6.android.service.TunnelControlPlan
+import cc.xlei.fuckipv6.android.service.TunnelControl
+import cc.xlei.fuckipv6.android.service.TunnelConfig
+import cc.xlei.fuckipv6.android.service.TunnelActions
+import cc.xlei.fuckipv6.android.service.FuckIpv6VpnService
 import cc.xlei.fuckipv6.android.bridge.BridgeState
 import cc.xlei.fuckipv6.android.bridge.CommandJson
 import cc.xlei.fuckipv6.android.bridge.CommandOutcome
@@ -115,6 +124,16 @@ class MainActivity : ComponentActivity() {
     private val invitations = MutableStateFlow<List<InvitationView>?>(null)
     private val issuedInvitationCode = MutableStateFlow<String?>(null)
     private val blacklist = MutableStateFlow<BlacklistView?>(null)
+    private val tunnelState = TunnelStateStore.updates
+    private var nodeBridge: NodeBridge? = null
+    private val vpnConsent =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val granted = result.resultCode == Activity.RESULT_OK
+            getSharedPreferences(PREFERENCES, MODE_PRIVATE).edit()
+                .putBoolean(KEY_VPN_CONSENT, granted)
+                .apply()
+            if (granted) startTunnelService()
+        }
     private val localExit = MutableStateFlow<cc.xlei.fuckipv6.android.bridge.LocalExitView?>(null)
     private var blacklistBridge: NodeCommandBridge? = null
     private var routingBridge: NodeCommandBridge? = null
@@ -138,6 +157,7 @@ class MainActivity : ComponentActivity() {
             ?.let { NodeBridge(HttpSnapshotSource(it)) }
             ?.also { candidate ->
                 bridge = candidate
+                nodeBridge = candidate
                 pollJob = candidate.start(bridgeScope)
             }
         commandBridge = apiConfig
@@ -394,6 +414,14 @@ class MainActivity : ComponentActivity() {
             val blacklistState = blacklist.collectAsState().value
             val apiUrl = getSharedPreferences(PREFERENCES, MODE_PRIVATE)
                 .getString(KEY_API_URL, null)
+            val tunnel = tunnelState.collectAsState().value
+            val consentGranted = getSharedPreferences(PREFERENCES, MODE_PRIVATE)
+                .getBoolean(KEY_VPN_CONSENT, false)
+            val control = TunnelControlPlan.decide(
+                consentGranted = consentGranted,
+                transportBound = TunnelTransports.current != null,
+                state = tunnel,
+            )
             FuckIpv6Theme {
                 contracts.fold(
                     onSuccess = {
@@ -433,6 +461,9 @@ class MainActivity : ComponentActivity() {
                                 ?: ready?.peers?.let(ExitSurface::parseLocalExit),
                             exitSelections = ready?.peers?.let(ExitSurface::parseSelections),
                             topology = ready?.peers?.let(TopologySurface::parse),
+                            tunnelControl = control,
+                            tunnelState = tunnel,
+                            onTunnelControl = ::onTunnelControl,
                             blacklist = blacklistState,
                             onRefreshBlacklist = { refreshBlacklist(selectedNetwork.value) },
                             onUpdateRouting = ::updateRouting,
@@ -838,6 +869,70 @@ class MainActivity : ComponentActivity() {
      * them the app shows the unavailable surface instead of probing a guessed
      * address.
      */
+    /**
+     * Compiles the tunnel intent from the selected network's snapshot data.
+     * Nothing is started until the platform VPN consent exists; the service
+     * itself fails closed when no packet transport is bound.
+     */
+    private fun startTunnelService() {
+        val config = tunnelConfig() ?: return
+        val intent = Intent(this, FuckIpv6VpnService::class.java)
+            .setAction(TunnelActions.ACTION_START)
+            .putExtra(FuckIpv6VpnService.EXTRA_NETWORK_NAME, config.networkName)
+            .putExtra(FuckIpv6VpnService.EXTRA_ADDRESS_V4, config.addressV4)
+            .putExtra(FuckIpv6VpnService.EXTRA_MTU, config.mtu)
+        config.addressV6?.let { intent.putExtra(FuckIpv6VpnService.EXTRA_ADDRESS_V6, it) }
+        if (config.dnsServers.isNotEmpty()) {
+            intent.putStringArrayListExtra(
+                FuckIpv6VpnService.EXTRA_DNS,
+                ArrayList(config.dnsServers),
+            )
+        }
+        ContextCompat.startForegroundService(this, intent)
+    }
+
+    private fun stopTunnelService() {
+        startService(
+            Intent(this, FuckIpv6VpnService::class.java).setAction(TunnelActions.ACTION_STOP),
+        )
+    }
+
+    /** Config comes from the snapshot, never from a guessed default. */
+    private fun tunnelConfig(): TunnelConfig? {
+        val ready = nodeBridge?.state()?.value as? BridgeState.Ready ?: return null
+        val snapshot = ready.peers ?: return null
+        val network = NetworksSurface.parse(snapshot)
+            ?.firstOrNull { it.name == selectedNetwork.value }
+            ?: return null
+        val addressV4 = network.assignedIpv4 ?: return null
+        return TunnelConfig(
+            networkName = network.name,
+            addressV4 = "$addressV4/32",
+            addressV6 = network.assignedIpv6?.let { "$it/128" },
+            mtu = FuckIpv6VpnService.DEFAULT_MTU,
+            dnsServers = emptyList(),
+        )
+    }
+
+    private fun onTunnelControl(control: TunnelControl) {
+        when (control) {
+            TunnelControl.REQUEST_CONSENT -> {
+                val intent = android.net.VpnService.prepare(this)
+                if (intent == null) {
+                    getSharedPreferences(PREFERENCES, MODE_PRIVATE).edit()
+                        .putBoolean(KEY_VPN_CONSENT, true)
+                        .apply()
+                    startTunnelService()
+                } else {
+                    vpnConsent.launch(intent)
+                }
+            }
+            TunnelControl.START -> startTunnelService()
+            TunnelControl.STOP -> stopTunnelService()
+            TunnelControl.WAITING, TunnelControl.UNAVAILABLE -> Unit
+        }
+    }
+
     private fun hasSavedToken(): Boolean =
         !getSharedPreferences(PREFERENCES, MODE_PRIVATE)
             .getString(KEY_API_TOKEN, null).isNullOrBlank()
@@ -869,5 +964,6 @@ class MainActivity : ComponentActivity() {
         private const val PREFERENCES = "fuckipv6.node"
         private const val KEY_API_URL = "node_api_url"
         private const val KEY_API_TOKEN = "node_api_token"
+        private const val KEY_VPN_CONSENT = "vpn_consent"
     }
 }

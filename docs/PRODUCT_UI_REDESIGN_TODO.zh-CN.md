@@ -4666,7 +4666,12 @@ Android 单测共 146 项通过。W16-01 仍缺真机验收，保持 `[ ]`。
   但它**没有任何生产入口**——全仓库只有 `crates/coordinator/src/lib.rs` 的 `pub mod webui;` 引用它，
   `crates/coordinator/tests/` 下也没有任何挂载；其中的 `complete_webui_css()` 只被它自己、
   `common` 的导出示例和**客户端**新表面复用。也就是说旧表面处于"无入口即禁用"的状态，符合本条
-  "移除**或**被禁用"的措辞。若要按 W0-03 的删除顺序彻底移除，还需删掉模块本身，这一项留给收尾。
+  "移除**或**被禁用"的措辞。若要按 W0-03 的删除顺序彻底移除，还需删掉模块本身，这一项留给收尾。**尝试过并回退了**（2026-11-26）：
+直接 `git rm` 该模块后 `cargo check` 报 `unresolved import fuckipv6_coordinator::webui`——
+`crates/client/src/webui/mod.rs` 与 `controller.rs` 复用了其中的 `NetworkConfigDto` 与
+`UpdateNetworkConfigRequest`。也就是说这个 3,704 行模块同时承担两种职责：**未挂载的路由**（可删）与
+**被客户端复用的 DTO**（不能删）。彻底移除的前置条件是把这 12 个 `pub struct/enum` 拆到独立模块，
+属于重构而不是清理，已回退并保持工作区可编译（`cargo check -p fuckipv6-client --lib` 零 error、`fmt` clean）。
   以下为上一轮的记录，保留以便对照。
 
   `crates/coordinator/src/webui/mod.rs` 仍是 3,704 行的独立控制台，

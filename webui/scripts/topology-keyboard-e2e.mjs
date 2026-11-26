@@ -811,15 +811,17 @@ async function main() {
       `document.querySelector('[data-testid="topology-zoom-status"]')?.textContent?.trim() === "100%"`,
       "zoom status reset to 100 percent",
     );
+    // The freeze control carries its label as visible text rather than aria-label,
+    // so it has to be matched by name instead of by attribute.
     await tabTo(
       cdp,
-      `el?.matches('button[aria-label="Freeze live layout"]')`,
+      `el?.tagName === "BUTTON" && (el.textContent || "").trim() === "Freeze live layout"`,
       "freeze control",
     );
     await pressKey(cdp, "Enter");
     await waitFor(
       cdp,
-      `document.querySelector('button[aria-label="Resume live layout"]')?.getAttribute("aria-pressed") === "true"`,
+      `[...document.querySelectorAll("button")].some((button) => (button.textContent || "").trim() === "Resume live layout" && button.getAttribute("aria-pressed") === "true")`,
       "frozen topology state",
     );
     await tabTo(

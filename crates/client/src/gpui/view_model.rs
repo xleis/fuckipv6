@@ -28,7 +28,7 @@ use fuckipv6_common::domain::{
     TrafficRoutingTargetKind, TrafficRoutingTargetRef, TrafficRoutingWorkflowState,
     TrafficSessionEventKind,
 };
-use fuckipv6_common::i18n::{format_decimal, format_integer, t, tr, Locale};
+use fuckipv6_common::i18n::{format_decimal, format_integer, format_timestamp, t, tr, Locale};
 use fuckipv6_common::ui_layout::navigation_module_for_page;
 use fuckipv6_common::NetworkMode;
 
@@ -4477,10 +4477,19 @@ fn project_overview(snapshot: &NodeSnapshot, locale: Locale) -> OverviewModel {
                     t(locale, "activity.outcome.denied")
                 }
             };
+            // Detail is the outcome plus when it happened. The action's audit
+            // resource is a wire identifier (`node_command_*`); it stays in the
+            // audit record and out of the overview card.
             let detail = tr(
                 locale,
-                "overview.activity.detail",
-                &[("outcome", outcome), ("resource", &entry.resource)],
+                "overview.activity.detail_time",
+                &[
+                    ("outcome", outcome),
+                    (
+                        "time",
+                        &routing_timestamp_label(Some(entry.occurred_at_unix_ms), locale),
+                    ),
+                ],
             );
             OverviewActivity {
                 id: entry.audit_id.to_string(),
@@ -4586,7 +4595,7 @@ fn project_networks(
         vec![metric(
             t(locale, "gpui.metric.running_networks"),
             snapshot.networks.len(),
-            "NodeSnapshot.networks",
+            t(locale, "common.snapshot"),
         )],
         vec![
             section(
@@ -4640,7 +4649,7 @@ fn project_peers(snapshot: &NodeSnapshot, locale: Locale) -> (Vec<MetricModel>, 
             metric(
                 t(locale, "gpui.metric.visible_peers"),
                 snapshot.peers.len(),
-                "NodeSnapshot.peers",
+                t(locale, "common.snapshot"),
             ),
             metric(
                 t(locale, "gpui.metric.p2p_healthy"),
@@ -4692,12 +4701,30 @@ fn routing_target_label(target: &Option<NodeRoutingTargetSnapshot>, locale: Loca
     }
 }
 
+/// Shortened identity for a headline. Node ids run to 40+ characters; the full
+/// value stays in the audit record and in technical surfaces.
+fn abbreviated_identity(value: &str) -> String {
+    let characters = value.chars().collect::<Vec<_>>();
+    if characters.len() <= 20 {
+        return value.to_string();
+    }
+    format!(
+        "{}…{}",
+        characters[..12].iter().collect::<String>(),
+        characters[characters.len() - 6..]
+            .iter()
+            .collect::<String>()
+    )
+}
+
+/// Local wall-clock time with an explicit UTC offset. Rendering raw UTC made the
+/// desktop surface disagree with WebUI copy that already prints `UTC+08:00`.
 fn routing_timestamp_label(unix_ms: Option<u64>, locale: Locale) -> String {
     unix_ms
-        .and_then(|timestamp| {
-            chrono::DateTime::<chrono::Utc>::from_timestamp_millis(timestamp as i64)
-        })
-        .map(|timestamp| timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+        .and_then(|timestamp| i64::try_from(timestamp).ok())
+        .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
+        .map(|timestamp| timestamp.with_timezone(&chrono::Local).fixed_offset())
+        .map(|timestamp| format_timestamp(locale, &timestamp))
         .unwrap_or_else(|| t(locale, "common.not_available").to_string())
 }
 
@@ -4944,27 +4971,27 @@ fn project_node_runtime(
             metric(
                 t(locale, "runtime.metric.status"),
                 t(locale, primary_status.label_key()),
-                "NodeSnapshot.primary_status",
+                t(locale, "common.snapshot"),
             ),
             metric(
                 t(locale, "runtime.metric.phase"),
                 phase,
-                "NodeSnapshot.lifecycle.phase",
+                t(locale, "common.snapshot"),
             ),
             metric(
                 t(locale, "runtime.metric.revision"),
                 snapshot.revision,
-                "NodeSnapshot.revision",
+                t(locale, "common.snapshot"),
             ),
             metric(
                 t(locale, "runtime.metric.active_networks"),
                 snapshot.lifecycle.active_networks,
-                "NodeSnapshot.lifecycle.active_networks",
+                t(locale, "common.snapshot"),
             ),
             metric(
                 t(locale, "runtime.metric.configured_networks"),
                 snapshot.lifecycle.configured_networks,
-                "NodeSnapshot.lifecycle.configured_networks",
+                t(locale, "common.snapshot"),
             ),
         ],
         {
@@ -5642,7 +5669,7 @@ fn project_activity(
                 &[("audit", entry.audit_id.as_str())],
             ));
             RowModel {
-                title: format!("{} · {action}", entry.actor),
+                title: format!("{} · {action}", abbreviated_identity(entry.actor.as_str())),
                 detail: details.join(" · "),
                 navigation: activity_object_navigation(snapshot, entry, locale),
             }
@@ -5668,22 +5695,22 @@ fn project_activity(
             metric(
                 t(locale, "gpui.metric.activity_total"),
                 all.len(),
-                "NodeSnapshot.recent_activity",
+                t(locale, "common.snapshot"),
             ),
             metric(
                 t(locale, "gpui.metric.activity_security"),
                 security,
-                "ActivityCategory",
+                t(locale, "common.snapshot"),
             ),
             metric(
                 t(locale, "gpui.metric.activity_failures"),
                 failures,
-                "ActivityCategory",
+                t(locale, "common.snapshot"),
             ),
             metric(
                 t(locale, "gpui.metric.activity_system"),
                 system,
-                "ActivityCategory",
+                t(locale, "common.snapshot"),
             ),
         ],
         vec![section(
@@ -7033,7 +7060,7 @@ fn project_exit_node(
             metric(
                 t(locale, "gpui.metric.exit_active_clients"),
                 local_exit.active_clients,
-                "NodeSnapshot.local_exit.active_clients",
+                t(locale, "common.snapshot"),
             ),
         ],
         vec![
@@ -7379,7 +7406,7 @@ fn project_relay(snapshot: &NodeSnapshot, locale: Locale) -> (Vec<MetricModel>, 
             metric(
                 t(locale, "gpui.metric.embedded_services"),
                 snapshot.embedded_services.len(),
-                "NodeSnapshot.embedded_services",
+                t(locale, "common.snapshot"),
             ),
             metric(
                 t(locale, "gpui.metric.relay_services"),
@@ -7957,7 +7984,7 @@ fn project_logs(snapshot: &NodeSnapshot, locale: Locale) -> (Vec<MetricModel>, V
         vec![metric(
             t(locale, "gpui.metric.log_buffer"),
             snapshot.logs.len(),
-            "NodeSnapshot.logs",
+            t(locale, "common.snapshot"),
         )],
         vec![section(
             t(locale, "gpui.section.bounded_logs"),
@@ -8016,12 +8043,12 @@ fn project_files(snapshot: &NodeSnapshot, locale: Locale) -> (Vec<MetricModel>, 
             metric(
                 t(locale, "settings.row.file_state"),
                 t(locale, capability_state_key(capability.state)),
-                "NodeSnapshot.file_capability.state",
+                t(locale, "common.snapshot"),
             ),
             metric(
                 t(locale, "settings.row.file_active_transfers"),
                 format_integer(locale, i64::from(capability.active_transfers)),
-                "NodeSnapshot.file_capability.active_transfers",
+                t(locale, "common.snapshot"),
             ),
         ],
         vec![section(
@@ -8086,7 +8113,7 @@ fn project_identity(
             } else {
                 t(locale, "gpui.value.unpublished")
             },
-            "NodeSnapshot.identity",
+            t(locale, "common.snapshot"),
         )],
         vec![
             section(
@@ -8575,11 +8602,6 @@ fn project_settings(
             &[("permission", t(locale, "choice.permission.manage_networks"))],
         )),
         Some(t(locale, "settings.policy_access.request_path").to_string()),
-        Some(tr(
-            locale,
-            "settings.policy_access.command",
-            &[("command", "apply_policy")],
-        )),
     ]
     .into_iter()
     .flatten()
@@ -8616,6 +8638,25 @@ fn project_settings(
             policy_write_access,
         ),
     ]);
+    // Eight repeated "not provided by this snapshot" rows buried the values the
+    // node does publish. Collapse them into one countable line.
+    let published = owner_rows
+        .iter()
+        .filter(|row| row.detail != not_exposed)
+        .cloned()
+        .collect::<Vec<_>>();
+    let withheld = owner_rows.len() - published.len();
+    let mut owner_rows = published;
+    if withheld > 0 {
+        owner_rows.push(row(
+            t(locale, "settings.row.not_provided"),
+            tr(
+                locale,
+                "settings.not_provided.count",
+                &[("count", &withheld.to_string())],
+            ),
+        ));
+    }
     let remote_rows = vec![
         row(
             t(locale, "settings.row.effective_ui"),
@@ -10047,7 +10088,14 @@ mod tests {
         for row in &section.rows {
             assert!(row.detail.contains('3'));
             assert!(row.detail.contains("7"));
-            assert!(row.detail.contains("2023-11-14 22:13:20 UTC"));
+            assert!(
+                row.detail.contains(&routing_timestamp_label(
+                    Some(1_700_000_000_000),
+                    Locale::En
+                )),
+                "routing row must carry the shared local timestamp: {}",
+                row.detail
+            );
             let navigation = row.navigation.as_ref().expect("typed route navigation");
             assert_eq!(navigation.page_id, "routing");
             assert_eq!(navigation.network_name.as_deref(), Some(row.title.as_str()));
@@ -10325,16 +10373,17 @@ mod tests {
                 t(Locale::ZhCn, "settings.row.public_key_fingerprint"),
                 t(Locale::ZhCn, "settings.row.access_model"),
                 t(Locale::ZhCn, "settings.row.granted_permissions"),
-                t(Locale::ZhCn, "settings.row.local_policy_revision"),
-                t(Locale::ZhCn, "settings.row.local_policy_validity"),
-                t(Locale::ZhCn, "settings.row.local_policy_rules"),
-                t(Locale::ZhCn, "settings.row.local_policy_vetoes"),
-                t(Locale::ZhCn, "settings.row.network_acls"),
-                t(Locale::ZhCn, "settings.row.field_privacy_policies"),
                 t(Locale::ZhCn, "settings.row.membership_policy_revisions"),
                 t(Locale::ZhCn, "settings.row.policy_write_access"),
+                t(Locale::ZhCn, "settings.row.not_provided"),
             ]
         );
+        // Fields the snapshot does not publish collapse into one countable line
+        // instead of repeating the same placeholder row.
+        assert!(owner
+            .rows
+            .iter()
+            .all(|row| row.title != t(Locale::ZhCn, "settings.row.local_policy_revision")));
         assert_eq!(owner.rows[0].detail, "desktop");
         assert!(owner.rows.iter().any(|row| {
             row.title == t(Locale::ZhCn, "settings.row.node_id") && row.detail == "node-1"
@@ -10473,11 +10522,8 @@ mod tests {
         assert!(access
             .detail
             .contains(t(Locale::ZhCn, "settings.policy_access.request_path")));
-        assert!(access.detail.contains(&tr(
-            Locale::ZhCn,
-            "settings.policy_access.command",
-            &[("command", "apply_policy")],
-        )));
+        // The raw action id (`apply_policy`) is not part of the visible copy.
+        assert!(!access.detail.contains("apply_policy"));
         assert!(!access
             .detail
             .contains(t(Locale::ZhCn, "settings.policy_access.writable")));

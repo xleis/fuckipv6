@@ -1,0 +1,19 @@
+{
+  "committed_before_power_cut": {
+    "config_revision": 1,
+    "latest_term": null
+  },
+  "completed_at_unix_ms": 1794679121545,
+  "fsck_exit_status_after_power_cut": 1,
+  "host_validation": "e2fsck -fy followed by raw-image debugfs extraction",
+  "kernel": "vmlinuz-linux",
+  "mode": "qemu-kvm-virtio-ext4-sigkill",
+  "power_cut": "host SIGKILL to the QEMU process; no guest shutdown or sync",
+  "qemu_pid_killed": 4073556,
+  "recovered_after_reboot": {
+    "candidate_revision": 1,
+    "ok": true
+  },
+  "schema": "fuckipv6.w14.powerloss.v1",
+  "store_sha256_after_reboot": "14c2f8e02f593bc72eba5c6568380f4f2e3827f9569b9e295f44edffd41b15b3"
+}

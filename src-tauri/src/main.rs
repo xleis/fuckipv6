@@ -34,16 +34,17 @@ fn token_candidates() -> Vec<PathBuf> {
     candidates
 }
 
-fn read_shell_token() -> Option<String> {
+fn read_shell_tokens() -> Vec<String> {
+    let mut tokens = Vec::new();
     for path in token_candidates() {
         if let Ok(token) = std::fs::read_to_string(&path) {
             let token = token.trim().to_string();
-            if !token.is_empty() {
-                return Some(token);
+            if !token.is_empty() && !tokens.contains(&token) {
+                tokens.push(token);
             }
         }
     }
-    None
+    tokens
 }
 
 /// Minimal HTTP/1.1 POST: the shell only ever talks to the loopback node, so a
@@ -97,25 +98,35 @@ fn main() {
                 .min_inner_size(960.0, 640.0)
                 .build()?;
 
-            match read_shell_token() {
-                Some(token) => match redeem_session(&host, port, &token) {
-                    Ok(set_cookie) => match Cookie::parse(set_cookie) {
-                        Ok(mut cookie) => {
-                            cookie.set_domain(host.clone());
-                            if let Err(error) = window.set_cookie(cookie) {
-                                eprintln!("[shell] could not install owner session: {error}");
-                            } else {
-                                eprintln!("[shell] local owner session established");
-                            }
-                        }
-                        Err(error) => eprintln!("[shell] unparsable session cookie: {error}"),
-                    },
-                    Err(error) => eprintln!("[shell] local session rejected: {error}"),
-                },
-                None => eprintln!(
+            let tokens = read_shell_tokens();
+            if tokens.is_empty() {
+                eprintln!(
                     "[shell] no bootstrap token in {:?}; the owner gate will ask for a passkey",
                     token_candidates()
-                ),
+                );
+            } else {
+                // Stale tokens from earlier runs may still sit in another
+                // runtime directory: try each until the node accepts one.
+                for token in &tokens {
+                    match redeem_session(&host, port, token) {
+                        Ok(set_cookie) => match Cookie::parse(set_cookie) {
+                            Ok(mut cookie) => {
+                                cookie.set_domain(host.clone());
+                                match window.set_cookie(cookie) {
+                                    Ok(()) => {
+                                        eprintln!("[shell] local owner session established");
+                                        break;
+                                    }
+                                    Err(error) => {
+                                        eprintln!("[shell] could not install owner session: {error}")
+                                    }
+                                }
+                            }
+                            Err(error) => eprintln!("[shell] unparsable session cookie: {error}"),
+                        },
+                        Err(error) => eprintln!("[shell] token rejected: {error}"),
+                    }
+                }
             }
 
             window.navigate(origin.parse()?)?;

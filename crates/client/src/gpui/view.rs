@@ -69,8 +69,9 @@ use super::view_model::{
     search_node_snapshot, sort_network_members, topology_member_actions, topology_node_detail,
     topology_presentation, traffic_protection_state_key, validate_manifest_bindings, ActionBinding,
     ActionBlockReason, ActivityFilters, CoordinatorGovernanceFreezeReason, MemberCapabilityFilter,
-    MemberDirectoryFilters, MemberHealthFilter, OverviewModel, PageKind, RowModel, RowNavigation,
-    SearchResult, SectionModel, TopologyPresentationCondition, TopologyPresentationSignals,
+    MemberDirectoryFilters, MemberHealthFilter, OverviewModel, OverviewShortcut, PageKind,
+    RowModel, RowNavigation, SearchResult, SectionModel, TopologyPresentationCondition,
+    TopologyPresentationSignals,
 };
 use crate::config_manager::ConfigManager;
 use crate::config_transaction::{
@@ -96,6 +97,7 @@ use crate::node::{
     OperationClientError, NODE_UI_ACTION_GROUPS,
 };
 use crate::remote_node::{RemoteFileOwnerClient, RemoteFileTransferClient, RemoteOperationClient};
+use crate::tun::TunPlatform;
 
 const WINDOW_WIDTH: f32 = DIMENSIONS.window_default_width_px as f32;
 const WINDOW_HEIGHT: f32 = DIMENSIONS.window_default_height_px as f32;
@@ -150,6 +152,18 @@ fn empty_state(text: impl Into<SharedString>) -> Div {
         .justify_center()
         .min_h(px(130.0))
         .rounded(px(16.0))
+        .text_size(px(12.0))
+        .line_height(px(18.0))
+        .text_color(rgba(COLOR_MUTED))
+        .child(text.into())
+}
+
+/// One muted line for an empty section inside a card. The tall centered
+/// placeholder ([`empty_state`]) is for full-page empties; inside a card it
+/// stretched the network summary to a mostly blank block.
+fn empty_line(text: impl Into<SharedString>) -> Div {
+    div()
+        .py_2()
         .text_size(px(12.0))
         .line_height(px(18.0))
         .text_color(rgba(COLOR_MUTED))
@@ -3846,12 +3860,14 @@ impl GpuiShell {
         let traffic_state = self.snapshot.traffic_session.state;
         let traffic_palette = semantic_palette(traffic_protection_semantic(traffic_state));
         let traffic_label = t(self.locale, traffic_protection_state_key(traffic_state));
+        // Only a real failure reason earns a second line in the top bar; an
+        // absent reason must not render as a trailing "None".
         let traffic_detail = self
             .snapshot
             .traffic_session
             .reason_code
             .as_deref()
-            .unwrap_or_else(|| t(self.locale, "traffic.session.no_reason"));
+            .filter(|reason| !reason.trim().is_empty());
         div()
             .debug_selector(|| "visual-top-status-group".into())
             .flex()
@@ -3945,7 +3961,7 @@ impl GpuiShell {
                                     .text_color(rgba(COLOR_TEXT))
                                     .child(traffic_label.to_string()),
                             )
-                            .when(show_details, |copy| {
+                            .when(show_details && traffic_detail.is_some(), |copy| {
                                 copy.child(
                                     div()
                                         .overflow_hidden()
@@ -3953,7 +3969,7 @@ impl GpuiShell {
                                         .text_ellipsis()
                                         .text_xs()
                                         .text_color(rgba(COLOR_MUTED))
-                                        .child(traffic_detail.to_string()),
+                                        .child(traffic_detail.unwrap_or_default().to_string()),
                                 )
                             }),
                     ),
@@ -4289,18 +4305,24 @@ impl GpuiShell {
                     .items_center()
                     .justify_center()
                     .child(
+                        // Brand mark: the shared open-ring + egress arrow glyph on a
+                        // paper tile. The previous ink square with a Wi-Fi glyph was
+                        // the one black block in an otherwise cream shell, and it was
+                        // not the product logo at all.
                         div()
                             .w(px(42.0))
                             .h(px(42.0))
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded(px(0.0))
-                            .bg(rgba(COLOR_TEXT))
+                            .rounded(px(12.0))
+                            .border_1()
+                            .border_color(rgba(COLOR_DIVIDER))
+                            .bg(rgba(COLOR_PANEL_RAISED))
                             .child(lucide_icon(
-                                include_bytes!("../../assets/icons/wifi.svg"),
+                                include_bytes!("../../assets/icons/brand-mark.svg"),
                                 23.0,
-                                COLOR_BG,
+                                COLOR_ACCENT,
                             )),
                     ),
             )
@@ -4946,6 +4968,67 @@ impl GpuiShell {
         }
     }
 
+    /// One quick action as an icon tile: glyph on top, one-line caption below.
+    fn overview_shortcut_tile(
+        &self,
+        shortcut: &OverviewShortcut,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let enabled = shortcut.action_id.is_some();
+        let mut card = div()
+            .id(SharedString::from(format!(
+                "overview-shortcut-{}",
+                shortcut.id
+            )))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_1()
+            .w(px(96.0))
+            .py_3()
+            .rounded(px(12.0))
+            .border_1()
+            .border_color(rgba(COLOR_DIVIDER))
+            .bg(rgba(DARK_THEME.colors.panel_solid.rgba_hex()))
+            .text_size(px(11.0))
+            .line_height(px(16.0))
+            .text_color(rgba(COLOR_TEXT_SECONDARY))
+            .aria_label(shortcut.label.clone())
+            .when(shortcut.id == "create_network", |card| {
+                card.debug_selector(|| "visual-shortcut-first".into())
+            })
+            .opacity(if enabled { 1.0 } else { 0.5 })
+            .hover(|style| style.bg(rgba(COLOR_PANEL_RAISED)))
+            .child(lucide_icon(
+                shortcut_icon(shortcut.id.as_str()),
+                18.0,
+                COLOR_ACCENT,
+            ))
+            .child(
+                div()
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .child(shortcut.label.clone()),
+            );
+        if let Some(reason) = &shortcut.unavailable_reason {
+            card = card.child(
+                div()
+                    .mt(px(2.0))
+                    .text_size(px(10.0))
+                    .line_height(px(12.5))
+                    .text_color(rgba(COLOR_FAINT))
+                    .child(reason.clone()),
+            );
+        }
+        if let Some(action_id) = shortcut.action_id.clone() {
+            card = card.on_click(cx.listener(move |shell, _, _, cx| {
+                shell.open_action("networks", &action_id, cx);
+            }));
+        }
+        card.into_any_element()
+    }
+
     fn overview_content(
         &self,
         overview: &OverviewModel,
@@ -5044,25 +5127,56 @@ impl GpuiShell {
                         )
                     })
                     .child(
+                        // One status chip instead of a second text block: the hero
+                        // line keeps its height, the detail stays a whisper.
                         div()
                             .flex()
-                            .items_baseline()
-                            .gap_1()
-                            .text_size(px(13.0))
-                            .line_height(px(20.0))
+                            .items_center()
+                            .gap_2()
+                            .min_w(px(0.0))
                             .child(
                                 div()
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .px_2()
+                                    .py(px(2.0))
+                                    .rounded_full()
+                                    .border_1()
+                                    .border_color(rgba(COLOR_DIVIDER))
+                                    .bg(rgba(COLOR_PANEL_RAISED))
+                                    .text_size(px(11.0))
+                                    .line_height(px(16.0))
+                                    .line_height(px(18.0))
                                     .font_weight(gpui::FontWeight(600.0))
-                                    .text_color(rgba(COLOR_TEXT_SECONDARY))
+                                    .text_color(rgba(hero_tone.rgba_hex()))
+                                    .child(
+                                        div()
+                                            .w(px(6.0))
+                                            .h(px(6.0))
+                                            .rounded_full()
+                                            .bg(rgba(hero_tone.rgba_hex())),
+                                    )
                                     .child(
                                         t(self.locale, overview.primary_status.label_key())
                                             .to_string(),
                                     ),
                             )
-                            .child(div().text_color(rgba(COLOR_TEXT_SECONDARY)).child(format!(
-                                "· {}",
-                                t(self.locale, overview.primary_status.detail_key())
-                            ))),
+                            .child(
+                                div()
+                                    .min_w(px(0.0))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(11.0))
+                                    .line_height(px(16.0))
+                                    .text_color(rgba(COLOR_MUTED))
+                                    .child(
+                                        t(self.locale, overview.primary_status.detail_key())
+                                            .to_string(),
+                                    ),
+                            ),
                     ),
             );
 
@@ -5088,19 +5202,83 @@ impl GpuiShell {
             );
         }
 
+        // One dense strip carries the numbers that used to live in spare vertical
+        // space: the shell reads as a dashboard instead of a mostly empty page.
+        let peer_total = overview
+            .networks
+            .iter()
+            .map(|network| network.peer_count)
+            .sum::<usize>();
+        let configured_networks = self.snapshot.configuration.networks.len();
+        let revision = self.snapshot.revision;
+        let metric_cell = |label: &'static str, value: String| {
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w(px(0.0))
+                .gap(px(2.0))
+                .px_4()
+                .py_3()
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .line_height(px(14.0))
+                        .font_weight(gpui::FontWeight(600.0))
+                        .text_color(rgba(COLOR_MUTED))
+                        .child(t(self.locale, label).to_string().to_uppercase()),
+                )
+                .child(
+                    div()
+                        .font_family("monospace")
+                        .text_size(px(15.0))
+                        .line_height(px(22.0))
+                        .font_weight(gpui::FontWeight(600.0))
+                        .text_color(rgba(COLOR_TEXT))
+                        .child(value),
+                )
+        };
+        let overview_metrics = div()
+            .debug_selector(|| "visual-overview-metrics".into())
+            .flex()
+            .w_full()
+            .min_w(px(0.0))
+            .rounded(px(14.0))
+            .border_1()
+            .border_color(rgba(COLOR_DIVIDER))
+            .bg(rgba(colors.panel_solid.rgba_hex()))
+            .overflow_hidden()
+            .children(
+                [
+                    metric_cell("overview.row.networks", overview.networks.len().to_string()),
+                    metric_cell("overview.metric.peers", peer_total.to_string()),
+                    metric_cell(
+                        "runtime.metric.configured_networks",
+                        configured_networks.to_string(),
+                    ),
+                    metric_cell("common.snapshot", format!("v{revision}")),
+                ]
+                .into_iter()
+                .enumerate()
+                .flat_map(|(index, cell)| {
+                    if index == 0 {
+                        vec![cell.into_any_element()]
+                    } else {
+                        vec![
+                            div()
+                                .w(px(1.0))
+                                .flex_shrink_0()
+                                .bg(rgba(COLOR_DIVIDER))
+                                .into_any_element(),
+                            cell.into_any_element(),
+                        ]
+                    }
+                }),
+            );
+
         let traffic_palette =
             semantic_palette(traffic_protection_semantic(overview.traffic_session.state));
         let traffic_state_label = overview.traffic_session.state_label.clone();
-        let traffic_reason = overview
-            .traffic_session
-            .reason_code
-            .clone()
-            .unwrap_or_else(|| t(self.locale, "traffic.session.no_reason").to_string());
-        let traffic_failure = overview
-            .traffic_session
-            .failure_label
-            .clone()
-            .unwrap_or_else(|| t(self.locale, "common.none").to_string());
         let traffic_changed_at = if overview.traffic_session.changed_at_unix_ms == 0 {
             t(self.locale, "traffic.session.not_observed").to_string()
         } else {
@@ -5207,36 +5385,26 @@ impl GpuiShell {
                             .text_color(rgba(traffic_palette.foreground.rgba_hex()))
                             .child(traffic_state_label),
                     )
-                    .child(
-                        div()
-                            .font_family("monospace")
-                            .text_xs()
-                            .text_color(rgba(COLOR_MUTED))
-                            .child(traffic_reason),
-                    ),
+                    // The wire reason code is a diagnostic token; it stays out of
+                    // the summary line and is only visible in the audit surfaces.
+                    .when(overview.traffic_session.reason_code.is_none(), |row| row),
             )
-            .child(
-                div()
+            .child({
+                // Empty diagnostics used to render as two "无" form fields. Keep
+                // the region for layout parity, but only fill it with real values.
+                let mut meta = div()
                     .debug_selector(|| "visual-traffic-meta".into())
-                    .mt_3()
                     .flex()
                     .flex_wrap()
-                    .gap_2()
-                    .child(meta_item(
-                        t(self.locale, "traffic.session.reason"),
-                        overview
-                            .traffic_session
-                            .reason_code
-                            .clone()
-                            .unwrap_or_else(|| {
-                                t(self.locale, "traffic.session.no_reason").to_string()
-                            }),
-                    ))
-                    .child(meta_item(
+                    .gap_2();
+                if let Some(failure) = overview.traffic_session.failure_label.clone() {
+                    meta = meta.mt_3().child(meta_item(
                         t(self.locale, "traffic.session.failure"),
-                        traffic_failure,
-                    )),
-            );
+                        failure,
+                    ));
+                }
+                meta
+            });
         if overview.traffic_session.validation.is_empty() {
             traffic_card = traffic_card.child(
                 div()
@@ -5412,11 +5580,11 @@ impl GpuiShell {
             );
         }
 
-        let mut primary_column = div().flex().flex_col().gap_4().flex_1().min_w(px(0.0));
+        let mut primary_column = div().flex().flex_col().gap_3().flex_1().min_w(px(0.0));
         let mut secondary_column = div()
             .flex()
             .flex_col()
-            .gap_4()
+            .gap_3()
             .flex_1()
             .min_w(px(0.0))
             .child(traffic_card);
@@ -5459,7 +5627,7 @@ impl GpuiShell {
         }
 
         let network_rows = if overview.networks.is_empty() {
-            vec![empty_state(t(self.locale, "common.no_running_networks")).into_any_element()]
+            vec![empty_line(t(self.locale, "common.no_running_networks")).into_any_element()]
         } else {
             overview
                 .networks
@@ -5618,7 +5786,7 @@ impl GpuiShell {
         );
 
         let activity_rows = if overview.activity.is_empty() {
-            vec![empty_state(t(self.locale, "overview.activity.empty"))
+            vec![empty_line(t(self.locale, "overview.activity.empty"))
                 .debug_selector(|| "visual-activity-empty".into())
                 .into_any_element()]
         } else {
@@ -5631,8 +5799,10 @@ impl GpuiShell {
                         .flex()
                         .items_start()
                         .gap_3()
-                        .py_3()
-                        .when(index > 0, |row| row)
+                        .py_2()
+                        .when(index > 0, |row| {
+                            row.border_t_1().border_color(rgba(COLOR_DIVIDER))
+                        })
                         .child(lucide_icon(
                             include_bytes!("../../assets/icons/circle-dot.svg"),
                             14.0,
@@ -5654,28 +5824,16 @@ impl GpuiShell {
                                         .child(activity.action.clone()),
                                 )
                                 .child(
+                                    // Outcome and time only: the raw command key
+                                    // (`node_command_*`, `start_networks`) belongs to
+                                    // the audit record, not to the overview card.
                                     div()
                                         .text_size(px(11.0))
                                         .line_height(px(16.0))
                                         .line_height(px(16.0))
                                         .text_color(rgba(COLOR_MUTED))
                                         .child(activity.detail.clone()),
-                                )
-                                .children(activity.command.as_ref().map(|command| {
-                                    div()
-                                        .mt(px(2.0))
-                                        .max_w(px(720.0))
-                                        .overflow_hidden()
-                                        .rounded(px(4.0))
-                                        .px(px(6.0))
-                                        .py(px(2.0))
-                                        .bg(rgba(COLOR_PANEL_RAISED))
-                                        .text_size(px(10.0))
-                                        .line_height(px(14.0))
-                                        .line_height(px(14.5))
-                                        .text_color(rgba(COLOR_TEXT_SECONDARY))
-                                        .child(command.clone())
-                                })),
+                                ),
                         )
                         .into_any_element()
                 })
@@ -5705,52 +5863,7 @@ impl GpuiShell {
         let shortcut_cards = overview
             .shortcuts
             .iter()
-            .map(|shortcut| {
-                let enabled = shortcut.action_id.is_some();
-                let mut card = div()
-                    .id(SharedString::from(format!(
-                        "overview-shortcut-{}",
-                        shortcut.id
-                    )))
-                    .flex()
-                    .flex_1()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(2.0))
-                    .min_w(px(0.0))
-                    .min_h(px(48.0))
-                    .px_3()
-                    .py_2()
-                    .rounded(px(9.0))
-                    .bg(rgba(colors.panel_solid.rgba_hex()))
-                    .text_size(px(12.0))
-                    .line_height(px(18.0))
-                    .font_weight(gpui::FontWeight(600.0))
-                    .text_color(rgba(COLOR_TEXT_SECONDARY))
-                    .when(shortcut.id == "create_network", |card| {
-                        card.debug_selector(|| "visual-shortcut-first".into())
-                    })
-                    .opacity(if enabled { 1.0 } else { 0.5 })
-                    .child(shortcut.label.clone());
-                if let Some(reason) = &shortcut.unavailable_reason {
-                    card = card.child(
-                        div()
-                            .text_size(px(10.0))
-                            .line_height(px(14.0))
-                            .line_height(px(12.5))
-                            .font_weight(gpui::FontWeight(400.0))
-                            .text_color(rgba(COLOR_FAINT))
-                            .child(reason.clone()),
-                    );
-                }
-                if let Some(action_id) = shortcut.action_id.clone() {
-                    card = card.on_click(cx.listener(move |shell, _, _, cx| {
-                        shell.open_action("networks", &action_id, cx);
-                    }));
-                }
-                card.into_any_element()
-            })
+            .map(|shortcut| self.overview_shortcut_tile(shortcut, cx))
             .collect::<Vec<_>>();
         let shortcuts_card = surface_card()
             .id("overview-shortcuts")
@@ -5777,7 +5890,95 @@ impl GpuiShell {
                     .children(shortcut_cards),
             );
 
-        let mut details_grid = div().flex().items_start().gap_4().w_full().min_w(px(0.0));
+        // The shortcut toolbar belongs under the network summary: it used to be a
+        // full-width band that left the left column empty underneath. With no
+        // network at all the onboarding panel owns the same actions, so the card
+        // is skipped instead of repeating the buttons twice on one page.
+        if !overview.networks.is_empty() {
+            primary_column = primary_column.child(shortcuts_card);
+        }
+
+        // Host facts the node already publishes. They give the left column the
+        // same visual weight as the right one without inventing anything.
+        let platform_label = match self.snapshot.tun_capabilities.platform {
+            TunPlatform::Linux => t(self.locale, "runtime.value.tun_platform.linux"),
+            TunPlatform::Macos => t(self.locale, "runtime.value.tun_platform.macos"),
+            TunPlatform::Windows => t(self.locale, "runtime.value.tun_platform.windows"),
+            TunPlatform::Other => t(self.locale, "runtime.value.tun_platform.other"),
+        };
+        let environment_row = |label: String, value: String, first: bool| {
+            let row = div()
+                .flex()
+                .items_baseline()
+                .justify_between()
+                .gap_3()
+                .py(px(6.0))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .line_height(px(16.0))
+                        .text_color(rgba(COLOR_MUTED))
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .font_family("monospace")
+                        .text_size(px(12.0))
+                        .line_height(px(17.0))
+                        .text_color(rgba(COLOR_TEXT))
+                        .child(value),
+                );
+            if first {
+                row
+            } else {
+                row.border_t_1().border_color(rgba(COLOR_DIVIDER))
+            }
+        };
+        let environment_card = surface_card()
+            .id("overview-environment")
+            .debug_selector(|| "visual-environment".into())
+            .flex()
+            .flex_col()
+            .p_4()
+            .child(card_heading(
+                t(self.locale, "overview.environment").to_string(),
+                lucide_icon(
+                    include_bytes!("../../assets/icons/cpu.svg"),
+                    17.0,
+                    COLOR_MUTED,
+                ),
+            ))
+            .child(environment_row(
+                t(self.locale, "runtime.row.tun_platform").to_string(),
+                platform_label.to_string(),
+                true,
+            ))
+            .child(environment_row(
+                t(self.locale, "runtime.row.tun_supported").to_string(),
+                t(
+                    self.locale,
+                    if self.snapshot.tun_capabilities.supported {
+                        "common.yes"
+                    } else {
+                        "common.no"
+                    },
+                )
+                .to_string(),
+                false,
+            ))
+            .child(environment_row(
+                t(self.locale, "runtime.section.services").to_string(),
+                self.snapshot.embedded_services.len().to_string(),
+                false,
+            ))
+            .child(environment_row(
+                t(self.locale, "settings.row.granted_permissions").to_string(),
+                self.snapshot.permissions.permissions.len().to_string(),
+                false,
+            ));
+        primary_column = primary_column.child(environment_card);
+
+        let mut details_grid = div().flex().items_start().gap_3().w_full().min_w(px(0.0));
         details_grid = if matches!(layout, LayoutClass::Desktop | LayoutClass::Wide) {
             details_grid
                 .flex_row()
@@ -5790,17 +5991,84 @@ impl GpuiShell {
                 .child(secondary_column)
         };
 
+        // First run: nothing to report yet, so the page closes with one calm
+        // panel instead of a long stretch of empty paper.
+        let onboarding = if overview.networks.is_empty() {
+            Some(
+                surface_card()
+                    .id("overview-onboarding")
+                    .debug_selector(|| "visual-onboarding".into())
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .w_full()
+                    .min_h(px(248.0))
+                    .p_6()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .w(px(60.0))
+                            .h(px(60.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(rgba(COLOR_DIVIDER))
+                            .bg(rgba(COLOR_PANEL_RAISED))
+                            .child(lucide_icon(
+                                include_bytes!("../../assets/icons/brand-mark.svg"),
+                                28.0,
+                                COLOR_ACCENT,
+                            )),
+                    )
+                    .child(
+                        div()
+                            .mt_2()
+                            .text_size(px(16.0))
+                            .line_height(px(24.0))
+                            .line_height(px(22.0))
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_TEXT))
+                            .text_center()
+                            .child(t(self.locale, "overview.onboarding.title").to_string()),
+                    )
+                    .child(
+                        div()
+                            .max_w(px(520.0))
+                            .text_size(px(12.0))
+                            .line_height(px(19.0))
+                            .text_color(rgba(COLOR_MUTED))
+                            .text_center()
+                            .child(t(self.locale, "overview.onboarding.body").to_string()),
+                    )
+                    .child(
+                        div().mt_3().flex().gap_2().children(
+                            overview
+                                .shortcuts
+                                .iter()
+                                .map(|shortcut| self.overview_shortcut_tile(shortcut, cx)),
+                        ),
+                    )
+                    .into_any_element(),
+            )
+        } else {
+            None
+        };
+
         div()
             .id("overview-stack")
             .debug_selector(|| "visual-overview-stack".into())
             .flex()
             .flex_col()
-            .gap_4()
+            .gap_3()
             .w_full()
             .min_w(px(0.0))
             .child(primary_card)
+            .child(overview_metrics)
             .child(details_grid)
-            .child(shortcuts_card)
+            .children(onboarding)
             .into_any_element()
     }
 
@@ -13642,13 +13910,22 @@ impl GpuiShell {
         for object_id in std::iter::once(None).chain(options.object_ids.into_iter().map(Some)) {
             let selected = self.activity_filters.object_id == object_id;
             let value = object_id.clone().unwrap_or_else(|| "all".into());
-            let label = object_id.clone().unwrap_or_else(|| all_label.clone());
+            // The filter chip carries the id for filtering, but the label is an
+            // abbreviated identity so a 40-character node id does not crowd the row.
+            let label = object_id
+                .as_deref()
+                .map(abbreviated_node_id)
+                .unwrap_or_else(|| all_label.clone());
             object_id_controls.push(
                 choice_control(
                     SharedString::from(format!("activity-filter-object-id-{value}")),
                     label,
                     selected,
                 )
+                // Long identities must not stretch the filter column and push the
+                // remaining groups onto their own lines.
+                .max_w(px(168.0))
+                .overflow_hidden()
                 .on_click(cx.listener(move |shell, _, _, cx| {
                     shell.activity_filters.object_id = object_id.clone();
                     cx.notify();
@@ -18850,6 +19127,17 @@ fn abbreviated_node_id(node_id: &str) -> String {
             .iter()
             .collect::<String>()
     )
+}
+
+/// Glyph per quick action. The icons carry the meaning; the caption stays one
+/// short line so the row reads as a toolbar.
+fn shortcut_icon(shortcut_id: &str) -> &'static [u8] {
+    match shortcut_id {
+        "create_network" => include_bytes!("../../assets/icons/plus.svg").as_slice(),
+        "discover_networks" => include_bytes!("../../assets/icons/search.svg").as_slice(),
+        "join_network" => include_bytes!("../../assets/icons/user-plus.svg").as_slice(),
+        _ => include_bytes!("../../assets/icons/waypoints.svg").as_slice(),
+    }
 }
 
 fn window_min_size() -> gpui::Size<gpui::Pixels> {

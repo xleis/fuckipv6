@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -174,7 +175,18 @@ def run_suite(suite: Suite, *, is_root: bool, timeout_override: int | None) -> d
         "domain": suite.domain,
         "description": suite.description,
     }
-    if suite.requires_release_build and not (PROJECT_ROOT / "target" / "release" / "deps").is_dir():
+    # Check for the actual release binary, not cargo's deps directory: a cleaned or
+    # relocated artifact tree can leave the binary without `deps/`.
+    release_dir = PROJECT_ROOT / "target" / "release"
+    release_binary = next(
+        (
+            candidate
+            for candidate in release_dir.glob("fuckipv6*")
+            if candidate.is_file() and candidate.suffix != ".d"
+        ),
+        None,
+    )
+    if suite.requires_release_build and release_binary is None:
         return {
             **base,
             "status": "skipped",
@@ -266,6 +278,10 @@ def render_markdown(report: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def is_running_as_root() -> bool:
+    return hasattr(os, "geteuid") and os.geteuid() == 0
+
+
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--only", action="append", default=[], help="suite name to run (repeatable)")
@@ -288,7 +304,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         print("no suites selected", file=sys.stderr)
         return 2
 
-    is_root = hasattr(sys, "geteuid") and sys.geteuid() == 0
+    is_root = is_running_as_root()
     results = [
         run_suite(suite, is_root=is_root, timeout_override=args.timeout_seconds)
         for suite in selected

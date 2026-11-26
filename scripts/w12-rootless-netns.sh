@@ -19,7 +19,30 @@ if [ "$#" -eq 0 ]; then
 fi
 
 if [ "$(id -u)" -eq 0 ]; then
-    exec "$@"
+    # When invoked via sudo on a developer workstation, drop back to the
+    # calling user so the wrapped script still runs inside an unprivileged
+    # user+mount+net namespace with slirp4netns and never touches host iptables,
+    # ip_forward or /etc/resolv.conf.
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ] \
+        && [ -e /dev/net/tun ] \
+        && command -v slirp4netns >/dev/null 2>&1 \
+        && command -v runuser >/dev/null 2>&1; then
+        exec runuser -u "$SUDO_USER" -- "${BASH_SOURCE[0]}" "$@"
+    fi
+    exec unshare -m --propagation private bash -c '
+        set -Eeuo pipefail
+        state=$(mktemp -d /tmp/w12-root-isolated.XXXXXX)
+        trap "rm -rf \"$state\"" EXIT INT TERM
+        cp /etc/resolv.conf "$state/resolv.conf"
+        cp /etc/nsswitch.conf "$state/nsswitch.conf"
+        mount -t tmpfs tmpfs /run
+        mkdir -p /run/netns /run/user /etc/netns /tmp/.X11-unix /var/run/netns
+        mount --bind "$state/resolv.conf" /etc/resolv.conf
+        mount --bind "$state/nsswitch.conf" /etc/nsswitch.conf
+        mount -t tmpfs tmpfs /var/run/netns
+        mount -t tmpfs tmpfs /etc/netns
+        exec "$@"
+    ' w12-root-isolated "$@"
 fi
 
 [ -e /dev/net/tun ] || { echo "[FAIL] /dev/net/tun is unavailable" >&2; exit 1; }

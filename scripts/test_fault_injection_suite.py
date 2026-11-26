@@ -6,6 +6,8 @@ from __future__ import annotations
 import importlib.util
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest import mock
 
 SCRIPT = Path(__file__).with_name("fault-injection-suite.py")
 SPEC = importlib.util.spec_from_file_location("fault_injection_suite", SCRIPT)
@@ -83,6 +85,43 @@ class FaultInjectionSuiteTest(unittest.TestCase):
             self.assertIsNotNone(script, suite.name)
             path = SUITE.PROJECT_ROOT / str(script)
             self.assertTrue(path.is_file(), f"{suite.name}: {script} is missing")
+
+    def test_release_build_check_looks_for_binary_not_deps_dir(self) -> None:
+        suite = SUITE.Suite(
+            "w15-file",
+            "File",
+            "d",
+            rootless_script="scripts/test-w15-file-netns.sh",
+            requires_release_build=True,
+        )
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            release_dir = root / "target" / "release"
+            release_dir.mkdir(parents=True)
+            with mock.patch.object(SUITE, "PROJECT_ROOT", root):
+                skipped = SUITE.run_suite(suite, is_root=False, timeout_override=1)
+                self.assertEqual(skipped["status"], "skipped")
+                self.assertIn("release build", skipped["reason"])
+
+                # A .d dep-info file alone must not count as a built binary.
+                (release_dir / "fuckipv6.d").write_text("", encoding="utf-8")
+                still_skipped = SUITE.run_suite(suite, is_root=False, timeout_override=1)
+                self.assertEqual(still_skipped["status"], "skipped")
+
+                # A binary without a legacy `deps/` directory (Cargo 1.100 layout)
+                # must proceed to execute the suite.
+                (release_dir / "fuckipv6").write_text("", encoding="utf-8")
+                completed = mock.Mock(returncode=0, stdout="ok\n", stderr="")
+                with mock.patch.object(SUITE.subprocess, "run", return_value=completed) as run_mock:
+                    passed = SUITE.run_suite(suite, is_root=False, timeout_override=1)
+                self.assertEqual(passed["status"], "passed")
+                run_mock.assert_called_once()
+
+    def test_root_detection_uses_os_geteuid(self) -> None:
+        with mock.patch.object(SUITE.os, "geteuid", return_value=0):
+            self.assertTrue(SUITE.is_running_as_root())
+        with mock.patch.object(SUITE.os, "geteuid", return_value=1000):
+            self.assertFalse(SUITE.is_running_as_root())
 
 
 if __name__ == "__main__":

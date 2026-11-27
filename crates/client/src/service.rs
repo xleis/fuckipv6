@@ -571,9 +571,10 @@ impl ServiceManager {
                 config, state, log, runtime
             ));
         }
+        let working_dir = systemd_unquoted_path(&self.layout.state_dir)?;
         definition.push_str(&format!(
             "WorkingDirectory={}\nExecStart={} __service --options-file {} --config-dir {}\nEnvironment={}\nEnvironment={}\n",
-            quote_systemd(path_str(&self.layout.state_dir)?),
+            working_dir,
             executable,
             options,
             config,
@@ -807,6 +808,20 @@ fn path_str(path: &Path) -> Result<&str> {
 fn quote_systemd(value: &str) -> String {
     let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{escaped}\"")
+}
+
+/// `systemd.exec(5)` parses `WorkingDirectory=` as a raw path and does not
+/// unquote double quotes (quoting `/var/lib/fuckipv6` makes systemd reject the
+/// unit with `WorkingDirectory= path is not absolute`).
+fn systemd_unquoted_path(path: &Path) -> Result<&str> {
+    let raw = path_str(path)?;
+    if raw.contains('\n') || raw.contains('\r') {
+        bail!("systemd 路径不能包含换行符: {raw:?}");
+    }
+    if !raw.starts_with('/') {
+        bail!("systemd WorkingDirectory 必须是绝对路径: {raw}");
+    }
+    Ok(raw)
 }
 
 fn xml_escape(value: &str) -> String {
@@ -1081,6 +1096,11 @@ mod tests {
         assert!(unit.contains("--config-dir"));
         assert!(unit.contains("KillMode=mixed"));
         assert!(unit.contains("TimeoutStopSec=75s"));
+        assert!(!unit.contains("WorkingDirectory=\""));
+        assert!(unit.contains(&format!(
+            "WorkingDirectory={}\n",
+            manager.layout.state_dir.display()
+        )));
         assert!(!unit.contains("--headless"));
         let (unit_section, service_section) = unit.split_once("[Service]").unwrap();
         assert!(unit_section.contains("StartLimitIntervalSec=30s"));

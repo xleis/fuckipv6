@@ -262,6 +262,82 @@ mod tests {
                 .await
                 .expect("telemetry");
             assert_eq!(telem_resp.status(), reqwest::StatusCode::OK);
+
+            // Authoritative UI manifest matches desktop/WebUI contract.
+            let manifest_resp = client
+                .get(format!("{api_url}/api/v1/manifest"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .expect("manifest");
+            assert_eq!(manifest_resp.status(), reqwest::StatusCode::OK);
+
+            // Authoritative traffic-policy read command succeeds synchronously (200 OK).
+            let tp_resp = client
+                .post(format!("{api_url}/api/v1/commands"))
+                .bearer_auth(&token)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(
+                    serde_json::json!({
+                        "schema_version": 1,
+                        "request": {
+                            "request_id": 101,
+                            "command": { "command": "get_traffic_policy" }
+                        }
+                    })
+                    .to_string(),
+                )
+                .send()
+                .await
+                .expect("get_traffic_policy");
+            assert_eq!(tp_resp.status(), reqwest::StatusCode::OK);
+
+            // Mutating stop_node returns 202 Accepted with canonical idem_<43> key
+            // and leaves the loopback control HTTP API online (W16-02 #4).
+            let stop_resp = client
+                .post(format!("{api_url}/api/v1/commands"))
+                .bearer_auth(&token)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(
+                    serde_json::json!({
+                        "schema_version": 1,
+                        "idempotency_key": "idem_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                        "request": {
+                            "request_id": 102,
+                            "command": { "command": "stop_node" }
+                        }
+                    })
+                    .to_string(),
+                )
+                .send()
+                .await
+                .expect("stop_node");
+            assert_eq!(stop_resp.status(), reqwest::StatusCode::ACCEPTED);
+
+            let snap_after_stop = client
+                .get(format!("{api_url}/api/v1/snapshot"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .expect("snapshot after stop_node");
+            assert_eq!(snap_after_stop.status(), reqwest::StatusCode::OK);
+
+            // File targets & Android network-changed endpoints respond cleanly.
+            let file_targets = client
+                .get(format!("{api_url}/api/v1/file/targets"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .expect("file targets");
+            assert_eq!(file_targets.status(), reqwest::StatusCode::OK);
+
+            let net_changed = client
+                .post(format!("{api_url}/api/v1/android/network-changed"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .expect("network changed");
+            assert_eq!(net_changed.status(), reqwest::StatusCode::OK);
         });
 
         handle.stop().expect("stop handle cleanly");

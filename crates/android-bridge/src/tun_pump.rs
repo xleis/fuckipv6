@@ -4,7 +4,10 @@
 //! Uses a dedicated reader thread driven by `poll(2)` on both the TUN fd and a
 //! self-pipe so shutdown is immediate and never leaks blocked descriptors.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(unix)]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(unix)]
 use std::sync::Arc;
 
 use serde::Serialize;

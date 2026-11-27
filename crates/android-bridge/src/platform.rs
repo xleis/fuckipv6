@@ -5,9 +5,12 @@
 //! TUN packet pump and guaranteeing idempotent teardown on close, cancel, or
 //! runtime shutdown.
 
+#[cfg(unix)]
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(unix)]
+use std::sync::Mutex;
 
 use fuckipv6_client::embedded::{
     EmbeddedNetwork, EmbeddedNetworkLease, EmbeddedNetworkRequest, EmbeddedPlatform,

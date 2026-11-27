@@ -37,6 +37,7 @@ fun OnboardingPage(
     savedUrl: String?,
     hasSavedToken: Boolean,
     onConnect: (url: String, token: String) -> Unit,
+    onStartEmbeddedNode: (() -> Unit)? = null,
 ) {
     var url by remember(savedUrl) { mutableStateOf(savedUrl.orEmpty()) }
     var token by remember { mutableStateOf("") }
@@ -106,6 +107,14 @@ fun OnboardingPage(
             },
         ) {
             Text(contracts.i18n.translate(locale, "onboarding.action.connect"))
+        }
+        if (onStartEmbeddedNode != null) {
+            Button(
+                modifier = Modifier.testTag("onboarding-start-embedded"),
+                onClick = onStartEmbeddedNode,
+            ) {
+                Text(contracts.i18n.translate(locale, "android.embedded.start"))
+            }
         }
         Text(
             text = contracts.i18n.translate(locale, "onboarding.token_note"),

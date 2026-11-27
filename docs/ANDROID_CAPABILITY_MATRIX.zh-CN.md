@@ -4,22 +4,22 @@
 > `mounted` 表示 Android 的 bridge/ui 源码里**真的出现**该命令字面量；只有注释或测试提到不算。
 
 - 可见动作：**77**（唯一命令 76）
-- Android 已挂载：**18**；桌面专属：**59**
+- Android 已挂载：**39**；桌面专属：**38**
 - manifest 之外的 Android 能力：**8** 项（黑名单/File/事件流/VpnService）
 - 生成状态：**passed**
 
 | 页面 | 动作 | 命令 | 桌面 | Android | Android 证据 |
 |---|---|---|---|---|---|
-| `networks` | `create_network` | `create_network` | `available` | `desktop-only` | — |
+| `networks` | `create_network` | `create_network` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/NetworkWorkflowSurface.kt` |
 | `networks` | `preview_network_profile` | `preview_network_profile` | `available` | `desktop-only` | — |
 | `networks` | `update_network_profile` | `update_network_profile` | `available` | `desktop-only` | — |
 | `networks` | `publish_network_discovery` | `publish_network_discovery` | `available` | `desktop-only` | — |
 | `networks` | `update_network_discovery` | `update_network_discovery` | `available` | `desktop-only` | — |
 | `networks` | `unpublish_network_discovery` | `unpublish_network_discovery` | `available` | `desktop-only` | — |
-| `networks` | `refresh_discovery_index` | `refresh_discovery_index` | `available` | `desktop-only` | — |
-| `networks` | `retry_discovery_index` | `retry_discovery_index` | `available` | `desktop-only` | — |
-| `networks` | `preview_join_network` | `preview_join_network` | `available` | `desktop-only` | — |
-| `networks` | `join_network` | `join_network` | `available` | `desktop-only` | — |
+| `networks` | `refresh_discovery_index` | `refresh_discovery_index` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/NetworkWorkflowSurface.kt` |
+| `networks` | `retry_discovery_index` | `retry_discovery_index` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/NetworkWorkflowSurface.kt` |
+| `networks` | `preview_join_network` | `preview_join_network` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/NetworkWorkflowSurface.kt` |
+| `networks` | `join_network` | `join_network` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/NetworkWorkflowSurface.kt` |
 | `networks` | `submit_join_request` | `submit_join_request` | `available` | `desktop-only` | — |
 | `networks` | `list_join_requests` | `list_join_requests` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/JoinRequestSurface.kt` |
 | `networks` | `list_network_members` | `list_network_members` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/MemberSurface.kt` |
@@ -33,25 +33,25 @@
 | `networks` | `list_invitations` | `list_invitations` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/InvitationSurface.kt` |
 | `networks` | `get_invitation_status` | `get_invitation_status` | `available` | `desktop-only` | — |
 | `networks` | `revoke_invitation` | `revoke_invitation` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/InvitationSurface.kt` |
-| `networks` | `preview_invitation` | `preview_invitation` | `available` | `desktop-only` | — |
-| `networks` | `redeem_invitation` | `redeem_invitation` | `available` | `desktop-only` | — |
+| `networks` | `preview_invitation` | `preview_invitation` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/NetworkWorkflowSurface.kt` |
+| `networks` | `redeem_invitation` | `redeem_invitation` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/NetworkWorkflowSurface.kt` |
 | `networks` | `leave_network` | `leave_network` | `available` | `desktop-only` | — |
 | `networks` | `acknowledge_membership_policy` | `acknowledge_membership_policy` | `available` | `desktop-only` | — |
 | `networks` | `get_coordinator_candidates` | `get_coordinator_candidates` | `available` | `desktop-only` | — |
-| `networks` | `update_coordinator_candidates` | `update_coordinator_candidates` | `available` | `desktop-only` | — |
+| `networks` | `update_coordinator_candidates` | `update_coordinator_candidates` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/NetworkWorkflowSurface.kt` |
 | `networks` | `publish_coordinator_candidate_declaration` | `publish_coordinator_candidate_declaration` | `available` | `desktop-only` | — |
-| `networks` | `start_networks` | `start_networks` | `available` | `desktop-only` | — |
-| `networks` | `stop_networks` | `stop_networks` | `available` | `desktop-only` | — |
-| `networks` | `restart_networks` | `restart_networks` | `available` | `desktop-only` | — |
-| `networks` | `rebuild_tun` | `rebuild_tun` | `available` | `desktop-only` | — |
+| `networks` | `start_networks` | `start_networks` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/NetworkWorkflowSurface.kt` |
+| `networks` | `stop_networks` | `stop_networks` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/NetworkWorkflowSurface.kt` |
+| `networks` | `restart_networks` | `restart_networks` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/NetworkWorkflowSurface.kt` |
+| `networks` | `rebuild_tun` | `rebuild_tun` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/NetworkWorkflowSurface.kt` |
 | `peers` | `probe_peer` | `probe_peer` | `available` | `desktop-only` | — |
 | `peers` | `get_blacklist` | `get_blacklist` | `available` | `desktop-only` | — |
 | `peers` | `ban_client` | `ban_client` | `available` | `desktop-only` | — |
 | `peers` | `unban_client` | `unban_client` | `available` | `desktop-only` | — |
 | `node_runtime` | `refresh_snapshot` | `get_snapshot` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/NodeApiConfig.kt` |
 | `node_runtime` | `get_node_diagnostics` | `get_node_diagnostics` | `available` | `desktop-only` | — |
-| `node_runtime` | `start_node` | `start_node` | `available` | `desktop-only` | — |
-| `node_runtime` | `stop_node` | `stop_node` | `available` | `desktop-only` | — |
+| `node_runtime` | `start_node` | `start_node` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/NetworkWorkflowSurface.kt` |
+| `node_runtime` | `stop_node` | `stop_node` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/NetworkWorkflowSurface.kt` |
 | `node_runtime` | `restart_node` | `restart_node` | `available` | `desktop-only` | — |
 | `node_runtime` | `cleanup_node_residuals` | `cleanup_node_residuals` | `available` | `desktop-only` | — |
 | `node_runtime` | `submit_admin_recovery` | `submit_admin_recovery` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/AdminRecoverySurface.kt` |
@@ -60,13 +60,13 @@
 | `node_runtime` | `revoke_admin_recovery` | `revoke_admin_recovery` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/AdminRecoverySurface.kt` |
 | `node_runtime` | `execute_admin_recovery` | `execute_admin_recovery` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/AdminRecoverySurface.kt` |
 | `routing` | `update_routing` | `update_routing` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/RoutingSurface.kt` |
-| `routing` | `get_traffic_policy` | `get_traffic_policy` | `available` | `desktop-only` | — |
-| `routing` | `preview_traffic_policy` | `preview_traffic_policy` | `available` | `desktop-only` | — |
-| `routing` | `preview_traffic_policy_rollback` | `preview_traffic_policy_rollback` | `available` | `desktop-only` | — |
-| `routing` | `apply_traffic_policy` | `apply_traffic_policy` | `available` | `desktop-only` | — |
-| `routing` | `rollback_traffic_policy` | `rollback_traffic_policy` | `available` | `desktop-only` | — |
-| `routing` | `get_traffic_policy_history` | `get_traffic_policy_history` | `available` | `desktop-only` | — |
-| `routing` | `test_traffic_policy` | `test_traffic_policy` | `available` | `desktop-only` | — |
+| `routing` | `get_traffic_policy` | `get_traffic_policy` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/TrafficPolicySurface.kt` |
+| `routing` | `preview_traffic_policy` | `preview_traffic_policy` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/TrafficPolicySurface.kt` |
+| `routing` | `preview_traffic_policy_rollback` | `preview_traffic_policy_rollback` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/TrafficPolicySurface.kt` |
+| `routing` | `apply_traffic_policy` | `apply_traffic_policy` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/TrafficPolicySurface.kt` |
+| `routing` | `rollback_traffic_policy` | `rollback_traffic_policy` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/TrafficPolicySurface.kt` |
+| `routing` | `get_traffic_policy_history` | `get_traffic_policy_history` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/TrafficPolicySurface.kt` |
+| `routing` | `test_traffic_policy` | `test_traffic_policy` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/TrafficPolicySurface.kt` |
 | `exit_node` | `set_local_exit_capability` | `set_local_exit_capability` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/ExitSurface.kt` |
 | `exit_node` | `set_exit_node_role` | `set_network_role` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/CommandJson.kt` |
 | `relay` | `set_relay_role` | `set_network_role` | `available` | `mounted` | `cc/xlei/fuckipv6/android/bridge/CommandJson.kt` |

@@ -24,6 +24,26 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 import cc.xlei.fuckipv6.android.bridge.AdminRecoverySurface
+import cc.xlei.fuckipv6.android.bridge.TrafficPolicyDocument
+import cc.xlei.fuckipv6.android.bridge.TrafficPolicyPreviewView
+import cc.xlei.fuckipv6.android.bridge.TrafficPolicyRevisionView
+import cc.xlei.fuckipv6.android.bridge.TrafficPolicySurface
+import cc.xlei.fuckipv6.android.bridge.TrafficPolicyTestView
+import cc.xlei.fuckipv6.android.bridge.TrafficRuleItem
+import cc.xlei.fuckipv6.android.bridge.NetworkWorkflowSurface
+import cc.xlei.fuckipv6.android.platform.AndroidDevicePolicyMonitor
+import cc.xlei.fuckipv6.android.platform.AndroidPasskeySessionStore
+import cc.xlei.fuckipv6.android.platform.DeviceEnvironmentSnapshot
+import cc.xlei.fuckipv6.android.platform.DevicePolicyDecision
+import cc.xlei.fuckipv6.android.platform.DevicePolicyEvaluator
+import cc.xlei.fuckipv6.android.platform.MeteredPolicySettings
+import cc.xlei.fuckipv6.android.platform.PasskeyErrorKind
+import cc.xlei.fuckipv6.android.platform.PasskeyOutcome
+import cc.xlei.fuckipv6.android.platform.PersistedSafShare
+import cc.xlei.fuckipv6.android.platform.SafQuotaPolicy
+import cc.xlei.fuckipv6.android.platform.SafShareManager
+import cc.xlei.fuckipv6.android.service.EmbeddedNodeHost
+import cc.xlei.fuckipv6.android.service.NativeNodeBridge
 import cc.xlei.fuckipv6.android.service.TunnelTransports
 import cc.xlei.fuckipv6.android.service.TunnelStateStore
 import cc.xlei.fuckipv6.android.service.TunnelControlPlan
@@ -138,8 +158,24 @@ class MainActivity : ComponentActivity() {
     private var blacklistBridge: NodeCommandBridge? = null
     private var routingBridge: NodeCommandBridge? = null
     private var exitBridge: NodeCommandBridge? = null
+    private var trafficPolicyBridge: NodeCommandBridge? = null
+    private var workflowBridge: NodeCommandBridge? = null
     private var memberNetworkId: String? = null
     private val selectedNetwork = MutableStateFlow<String?>(null)
+    private val trafficPolicy = MutableStateFlow<TrafficPolicyDocument?>(null)
+    private val trafficPolicyPreview = MutableStateFlow<TrafficPolicyPreviewView?>(null)
+    private val trafficPolicyTest = MutableStateFlow<TrafficPolicyTestView?>(null)
+    private val trafficPolicyHistory = MutableStateFlow<List<TrafficPolicyRevisionView>>(emptyList())
+    private val safShares = MutableStateFlow<List<PersistedSafShare>>(emptyList())
+    private val safRevokedNotice = MutableStateFlow(false)
+    private val passkeyReauthValid = MutableStateFlow(false)
+    private val passkeyError = MutableStateFlow<PasskeyErrorKind?>(null)
+    private val deviceEnv = MutableStateFlow<DeviceEnvironmentSnapshot?>(null)
+    private val devicePolicy = MutableStateFlow<DevicePolicyDecision?>(null)
+    private lateinit var safShareManager: SafShareManager
+    private lateinit var passkeyStore: AndroidPasskeySessionStore
+    private lateinit var devicePolicyMonitor: AndroidDevicePolicyMonitor
+    private var embeddedAutoConnected = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -151,7 +187,34 @@ class MainActivity : ComponentActivity() {
         )
         val contracts = runCatching { SharedContractLoader.load(assets) }
 
-        val apiConfig = loadApiConfig(intent)
+        safShareManager = SafShareManager(this) { _ ->
+            safRevokedNotice.value = true
+            // Stop in-flight download saver and refresh transfers on SAF revocation (W16-04 #7).
+            transferController?.refresh()
+        }
+        passkeyStore = AndroidPasskeySessionStore(this)
+        devicePolicyMonitor = AndroidDevicePolicyMonitor(this)
+        refreshDevicePolicy()
+        safShares.value = safShareManager.verifyGrants()
+
+        // If native embedded Rust node is packaged and no explicit remote URL is set,
+        // automatically start the foreground control service and bind to its loopback endpoint.
+        val initialExplicitConfig = loadApiConfig(intent)
+        if (initialExplicitConfig == null && NativeNodeBridge.isLibraryLoaded) {
+            startEmbeddedControl()
+        }
+        bridgeScope.launch {
+            EmbeddedNodeHost.endpoint.collect { endpoint ->
+                if (endpoint != null && apiConfig == null && !embeddedAutoConnected) {
+                    embeddedAutoConnected = true
+                    runOnUiThread { recreate() }
+                }
+            }
+        }
+
+        val apiConfig = initialExplicitConfig ?: EmbeddedNodeHost.endpoint.value?.let {
+            NodeApiConfig(baseUrl = it.apiUrl, token = it.token)
+        }
         val node = apiConfig
             ?.takeIf { it.isValid }
             ?.let { NodeBridge(HttpSnapshotSource(it)) }
@@ -259,6 +322,45 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        trafficPolicyBridge = apiConfig
+            ?.takeIf { it.isValid }
+            ?.let { NodeCommandBridge(NodeCommandClient(it)) }
+            ?.also { bridge ->
+                bridgeScope.launch {
+                    bridge.lastOutcome().collect { outcome ->
+                        if (outcome !is CommandOutcome.Succeeded) return@collect
+                        when (outcome.outcomeStatus) {
+                            "traffic_policy", "traffic_policy_applied", "traffic_policy_rolled_back" -> {
+                                TrafficPolicySurface.parseDocument(outcome.data)?.let {
+                                    trafficPolicy.value = it
+                                }
+                                node?.pollOnce()
+                            }
+                            "traffic_policy_preview" -> {
+                                trafficPolicyPreview.value = TrafficPolicySurface.parsePreview(outcome.data)
+                            }
+                            "traffic_policy_test" -> {
+                                trafficPolicyTest.value = TrafficPolicySurface.parseTest(outcome.data)
+                            }
+                            "traffic_policy_history" -> {
+                                trafficPolicyHistory.value = TrafficPolicySurface.parseHistory(outcome.data)
+                            }
+                        }
+                    }
+                }
+            }
+        workflowBridge = apiConfig
+            ?.takeIf { it.isValid }
+            ?.let { NodeCommandBridge(NodeCommandClient(it)) }
+            ?.also { bridge ->
+                bridgeScope.launch {
+                    bridge.lastOutcome().collect { outcome ->
+                        if (outcome is CommandOutcome.Succeeded) {
+                            node?.pollOnce()
+                        }
+                    }
+                }
+            }
         recoveryBridge = apiConfig
             ?.takeIf { it.isValid }
             ?.let { NodeCommandBridge(NodeCommandClient(it)) }
@@ -283,7 +385,7 @@ class MainActivity : ComponentActivity() {
             }
         // Events only shorten the wait: every frame still triggers one
         // authoritative snapshot pull, and the timed poll stays as fallback.
-        if (node != null && apiConfig != null) {
+        if (node != null) {
             // Frames collapse into one authoritative pull per burst, and each
             // reconnect resumes from the newest cursor instead of replaying.
             val coalescer = SnapshotFrameCoalescer(
@@ -310,7 +412,7 @@ class MainActivity : ComponentActivity() {
                     selectedNetwork.value = chosen.networkName
                 }
                 val networkName = chosen.networkName
-                if (networkName != null) {
+                run {
                     val networkId = ready.networks
                         .firstOrNull { it.networkName == networkName }
                         ?.networkId
@@ -382,6 +484,15 @@ class MainActivity : ComponentActivity() {
             val uploadPicker = rememberLauncherForActivityResult(
                 ActivityResultContracts.OpenDocument(),
             ) { uri -> if (uri != null) uploadPicked(uri) }
+            val safTreePicker = rememberLauncherForActivityResult(
+                ActivityResultContracts.OpenDocumentTree(),
+            ) { uri ->
+                if (uri != null) {
+                    safShareManager.persistTreeGrant(uri)
+                    safRevokedNotice.value = false
+                    safShares.value = safShareManager.verifyGrants()
+                }
+            }
             val savePicker = rememberLauncherForActivityResult(
                 ActivityResultContracts.CreateDocument("application/octet-stream"),
             ) { uri ->
@@ -415,18 +526,33 @@ class MainActivity : ComponentActivity() {
             val apiUrl = getSharedPreferences(PREFERENCES, MODE_PRIVATE)
                 .getString(KEY_API_URL, null)
             val tunnel = tunnelState.collectAsState().value
+            val embeddedEndpoint = EmbeddedNodeHost.endpoint.collectAsState().value
+            val nativeTelemetry = EmbeddedNodeHost.telemetry.collectAsState().value
+            val trafficPolicyState = trafficPolicy.collectAsState().value
+            val trafficPolicyPreviewState = trafficPolicyPreview.collectAsState().value
+            val trafficPolicyTestState = trafficPolicyTest.collectAsState().value
+            val trafficPolicyHistoryState = trafficPolicyHistory.collectAsState().value
+            val safSharesState = safShares.collectAsState().value
+            val safRevokedState = safRevokedNotice.collectAsState().value
+            val passkeyReauthState = passkeyReauthValid.collectAsState().value
+            val passkeyErrorState = passkeyError.collectAsState().value
+            val deviceEnvState = deviceEnv.collectAsState().value
+            val devicePolicyState = devicePolicy.collectAsState().value
             val consentGranted = getSharedPreferences(PREFERENCES, MODE_PRIVATE)
-                .getBoolean(KEY_VPN_CONSENT, false)
+                .getBoolean(KEY_VPN_CONSENT, false) || android.net.VpnService.prepare(this) == null
             val control = TunnelControlPlan.decide(
                 consentGranted = consentGranted,
-                transportBound = TunnelTransports.current != null,
+                transportBound = TunnelTransports.current != null || NativeNodeBridge.isLibraryLoaded,
                 state = tunnel,
             )
             FuckIpv6Theme {
                 contracts.fold(
                     onSuccess = {
+                        val effectiveConfig = loadApiConfig(intent) ?: embeddedEndpoint?.let { ep ->
+                            NodeApiConfig(baseUrl = ep.apiUrl, token = ep.token)
+                        }
                         val onboarding = OnboardingProjection.decide(
-                            loadApiConfig(intent),
+                            effectiveConfig,
                             bridgeState,
                         )
                         if (onboarding.step != OnboardingStep.READY) {
@@ -437,6 +563,11 @@ class MainActivity : ComponentActivity() {
                                 savedUrl = apiUrl,
                                 hasSavedToken = hasSavedToken(),
                                 onConnect = { url, token -> saveApiConfig(url, token) },
+                                onStartEmbeddedNode = if (NativeNodeBridge.isLibraryLoaded) {
+                                    ::startEmbeddedControl
+                                } else {
+                                    null
+                                },
                             )
                             return@fold
                         }
@@ -445,6 +576,14 @@ class MainActivity : ComponentActivity() {
                             relay = relay,
                             coordinator = coordinator,
                             adminRecovery = admin,
+                            settings = settingsData(browse),
+                            fileBrowse = browseState,
+                            fileBrowseActions = browseActions(
+                                controller = browse,
+                                requestUpload = { uploadPicker.launch(arrayOf("*/*")) },
+                                downloadFile = ::startDownload,
+                            ),
+                            transfers = transferState,
                             peers = ready?.peers
                                 ?.let { snapshot -> PeersSurface.parse(snapshot, selectedNetworkName.orEmpty()) },
                             activity = ready?.peers?.let { snapshot ->
@@ -464,9 +603,51 @@ class MainActivity : ComponentActivity() {
                             tunnelControl = control,
                             tunnelState = tunnel,
                             onTunnelControl = ::onTunnelControl,
+                            onStopDataPlaneOnly = ::stopDataPlaneOnly,
+                            embeddedEndpoint = embeddedEndpoint,
+                            nativeTelemetry = nativeTelemetry,
+                            onStartEmbeddedNode = if (NativeNodeBridge.isLibraryLoaded) {
+                                ::startEmbeddedControl
+                            } else {
+                                null
+                            },
+                            deviceEnv = deviceEnvState,
+                            devicePolicy = devicePolicyState,
+                            onOpenBatterySettings = {
+                                runCatching {
+                                    startActivity(devicePolicyMonitor.batteryOptimizationSettingsIntent())
+                                }
+                            },
                             blacklist = blacklistState,
                             onRefreshBlacklist = { refreshBlacklist(selectedNetwork.value) },
                             onUpdateRouting = ::updateRouting,
+                            trafficPolicy = trafficPolicyState,
+                            trafficPolicyPreview = trafficPolicyPreviewState,
+                            trafficPolicyTest = trafficPolicyTestState,
+                            trafficPolicyHistory = trafficPolicyHistoryState,
+                            onLoadTrafficPolicy = ::loadTrafficPolicy,
+                            onPreviewTrafficPolicy = ::previewTrafficPolicy,
+                            onApplyTrafficPolicy = ::applyTrafficPolicy,
+                            onTestTrafficPolicy = ::testTrafficPolicy,
+                            onRollbackTrafficPolicy = ::rollbackTrafficPolicy,
+                            onCreateNetwork = ::createNetwork,
+                            onJoinNetwork = ::joinNetwork,
+                            onRefreshDiscovery = ::refreshDiscoveryIndex,
+                            safShares = safSharesState,
+                            safRevokedNotice = safRevokedState,
+                            onPickSafFolder = { safTreePicker.launch(null) },
+                            onVerifySafGrants = {
+                                safShares.value = safShareManager.verifyGrants()
+                            },
+                            onReleaseSafShare = { uri ->
+                                safShareManager.releaseTreeGrant(uri)
+                                safShares.value = safShareManager.verifyGrants()
+                            },
+                            passkeyReauthValid = passkeyReauthState,
+                            passkeyError = passkeyErrorState,
+                            onVerifyPasskey = ::verifyPasskey,
+                            onRegisterPasskey = ::registerPasskey,
+                            onClearAuthCache = ::clearAuthCache,
                             onSetLocalExit = ::setLocalExit,
                             onBanClient = ::banClient,
                             onUnbanClient = ::unbanClient,
@@ -617,14 +798,23 @@ class MainActivity : ComponentActivity() {
         val config = apiConfig ?: return
         val current = browseController?.state()?.value ?: return
         val target = current.selected ?: return
-        val length = contentResolver.uploadLength(uri)
-        if (length == null) {
-            // Nothing to send: the provider hid the size, and guessing one would
-            // corrupt the upload. Say so instead of looking like a dead button.
+        val inspection = safShareManager.inspectDocument(uri)
+        if (!inspection.canStreamWithFixedLength) {
+            // Virtual/cloud documents or unknown-length streams cannot be guessed safely (W16-04 #5).
             transferController?.reportClientError("file.page.error.unsupported_detail")
             return
         }
-        val name = contentResolver.displayName(uri)
+        val length = inspection.sizeBytes ?: return
+        val activeTransfers = transferController?.state()?.value?.transfers?.count { it.isActive } ?: 0
+        SafQuotaPolicy.isTransferAllowed(
+            activeTransfers = activeTransfers,
+            requestedBytes = length,
+            currentCacheBytes = safShareManager.currentTempCacheBytes(),
+        )?.let { quotaError ->
+            transferController?.reportClientError(quotaError)
+            return
+        }
+        val name = inspection.displayName ?: contentResolver.displayName(uri)
         val path = FileTransferNaming.uploadTargetPath(current.path, name)
         if (path == null) {
             transferController?.reportClientError("file.page.error.invalid_filename_detail")
@@ -640,11 +830,180 @@ class MainActivity : ComponentActivity() {
             contentLength = length,
             open = { contentResolver.openUploadSource(uri) },
         )
-        // `config` is only read through the controller's transport; keep the
-        // validity check non-throwing so a stale config cannot crash the picker.
         if (!config.isValid) {
             transferController?.reportClientError("file.page.error.unsupported_detail")
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        refreshDevicePolicy()
+        safShares.value = safShareManager.verifyGrants()
+        passkeyReauthValid.value = passkeyStore.hasRecentReauth()
+        EmbeddedNodeHost.refreshTelemetry()
+    }
+
+    private fun refreshDevicePolicy() {
+        val env = devicePolicyMonitor.captureSnapshot()
+        deviceEnv.value = env
+        val telem = EmbeddedNodeHost.telemetry.value
+        val usedBytes = (telem?.rxBytes ?: 0L) + (telem?.txBytes ?: 0L)
+        devicePolicy.value = DevicePolicyEvaluator.evaluate(env, MeteredPolicySettings(), usedBytes)
+    }
+
+    private fun startEmbeddedControl() {
+        ContextCompat.startForegroundService(
+            this,
+            FuckIpv6VpnService.startControlIntent(this, autoRestoreNetworks = true),
+        )
+    }
+
+    private fun stopDataPlaneOnly() {
+        startService(FuckIpv6VpnService.stopDataPlaneIntent(this))
+    }
+
+    private fun loadTrafficPolicy() {
+        val bridge = trafficPolicyBridge ?: return
+        bridge.submit(
+            bridgeScope,
+            CommandJson.envelope(
+                command = TrafficPolicySurface.getPolicyCommand(),
+                requestId = nextRequestId(),
+                idempotencyKey = "tp-get-${UUID.randomUUID()}",
+            ),
+        )
+        bridge.submit(
+            bridgeScope,
+            CommandJson.envelope(
+                command = TrafficPolicySurface.getHistoryCommand(),
+                requestId = nextRequestId(),
+                idempotencyKey = "tp-hist-${UUID.randomUUID()}",
+            ),
+        )
+    }
+
+    private fun previewTrafficPolicy(
+        defaultKind: String,
+        defaultTarget: String?,
+        rules: List<TrafficRuleItem>,
+    ) {
+        val bridge = trafficPolicyBridge ?: return
+        val rev = trafficPolicy.value?.revision ?: 0L
+        val draft = TrafficPolicySurface.buildDraftJson(defaultKind, defaultTarget, rules)
+        val cmd = TrafficPolicySurface.previewCommand(rev, draft) ?: return
+        bridge.submit(
+            bridgeScope,
+            CommandJson.envelope(cmd, nextRequestId(), "tp-preview-${UUID.randomUUID()}"),
+        )
+    }
+
+    private fun applyTrafficPolicy(
+        defaultKind: String,
+        defaultTarget: String?,
+        rules: List<TrafficRuleItem>,
+        confirmRisk: Boolean,
+    ) {
+        val bridge = trafficPolicyBridge ?: return
+        val rev = trafficPolicy.value?.revision ?: 0L
+        val draft = TrafficPolicySurface.buildDraftJson(defaultKind, defaultTarget, rules)
+        val cmd = TrafficPolicySurface.applyCommand(rev, draft, confirmRisk) ?: return
+        bridge.submit(
+            bridgeScope,
+            CommandJson.envelope(cmd, nextRequestId(), "tp-apply-${UUID.randomUUID()}"),
+        )
+    }
+
+    private fun testTrafficPolicy(
+        destination: String,
+        defaultKind: String,
+        defaultTarget: String?,
+        rules: List<TrafficRuleItem>,
+    ) {
+        val bridge = trafficPolicyBridge ?: return
+        val current = trafficPolicy.value?.rawPolicy ?: TrafficPolicySurface.buildDraftJson("direct", null, emptyList())
+        val candidate = TrafficPolicySurface.buildDraftJson(defaultKind, defaultTarget, rules)
+        val cmd = TrafficPolicySurface.testCommand(current, candidate, destination) ?: return
+        bridge.submit(
+            bridgeScope,
+            CommandJson.envelope(cmd, nextRequestId(), "tp-test-${UUID.randomUUID()}"),
+        )
+    }
+
+    private fun rollbackTrafficPolicy(targetRevision: Long) {
+        val bridge = trafficPolicyBridge ?: return
+        val rev = trafficPolicy.value?.revision ?: 0L
+        val cmd = TrafficPolicySurface.rollbackCommand(rev, targetRevision, confirmRisk = true) ?: return
+        bridge.submit(
+            bridgeScope,
+            CommandJson.envelope(cmd, nextRequestId(), "tp-rollback-$targetRevision-${UUID.randomUUID()}"),
+        )
+    }
+
+    private fun createNetwork(name: String) {
+        val bridge = workflowBridge ?: return
+        val cmd = NetworkWorkflowSurface.createNetworkCommand(name) ?: return
+        bridge.submit(
+            bridgeScope,
+            CommandJson.envelope(cmd, nextRequestId(), "net-create-$name-${UUID.randomUUID()}"),
+        )
+    }
+
+    private fun joinNetwork(ticket: String, alias: String?) {
+        val bridge = workflowBridge ?: return
+        val cmd = NetworkWorkflowSurface.joinNetworkCommand(ticket, alias) ?: return
+        bridge.submit(
+            bridgeScope,
+            CommandJson.envelope(cmd, nextRequestId(), "net-join-${UUID.randomUUID()}"),
+        )
+    }
+
+    private fun refreshDiscoveryIndex() {
+        val bridge = workflowBridge ?: return
+        val cmd = NetworkWorkflowSurface.refreshDiscoveryIndexCommand()
+        bridge.submit(
+            bridgeScope,
+            CommandJson.envelope(cmd, nextRequestId(), "discovery-refresh-${UUID.randomUUID()}"),
+        )
+    }
+
+    private fun verifyPasskey() {
+        bridgeScope.launch {
+            val challenge = UUID.randomUUID().toString().replace("-", "")
+            val requestJson = """{"challenge":"$challenge","rpId":"localhost","userVerification":"required"}"""
+            when (val outcome = passkeyStore.signInWithPasskey(this@MainActivity, requestJson)) {
+                is PasskeyOutcome.Verified -> {
+                    passkeyReauthValid.value = true
+                    passkeyError.value = null
+                }
+                is PasskeyOutcome.Failed -> {
+                    passkeyReauthValid.value = passkeyStore.hasRecentReauth()
+                    passkeyError.value = outcome.kind
+                }
+            }
+        }
+    }
+
+    private fun registerPasskey() {
+        bridgeScope.launch {
+            val challenge = UUID.randomUUID().toString().replace("-", "")
+            val userId = EmbeddedNodeHost.endpoint.value?.nodeId?.take(16) ?: "owner"
+            val requestJson = """{"challenge":"$challenge","rp":{"name":"FuckIPv6","id":"localhost"},"user":{"id":"$userId","name":"owner","displayName":"Node Owner"},"pubKeyCredParams":[{"type":"public-key","alg":-7}]}"""
+            when (val outcome = passkeyStore.registerPasskey(this@MainActivity, requestJson)) {
+                is PasskeyOutcome.Verified -> {
+                    passkeyReauthValid.value = true
+                    passkeyError.value = null
+                }
+                is PasskeyOutcome.Failed -> {
+                    passkeyError.value = outcome.kind
+                }
+            }
+        }
+    }
+
+    private fun clearAuthCache() {
+        passkeyStore.clearSensitiveSessionCache()
+        passkeyReauthValid.value = false
+        passkeyError.value = null
     }
 
     /**

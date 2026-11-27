@@ -43,8 +43,8 @@ data class TopologyView(
 )
 
 object TopologySurface {
-    const val MAX_NODES = 50
-    const val MAX_CONNECTIONS = 100
+    const val MAX_NODES = 1000
+    const val MAX_CONNECTIONS = 5000
 
     fun parse(snapshot: JSONObject): TopologyView? {
         val topology = snapshot.optJSONObject("topology") ?: return null

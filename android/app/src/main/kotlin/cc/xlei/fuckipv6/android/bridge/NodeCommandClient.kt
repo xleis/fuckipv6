@@ -142,7 +142,8 @@ class NodeCommandClient(
     override fun submit(body: String): CommandOutcome =
         exchange(CommandJson.commandsUrl(config), body) { status, responseBody ->
             when {
-                status == HttpURLConnection.HTTP_OK -> CommandResponseParser.parseCommandResponse(responseBody)
+                status == HttpURLConnection.HTTP_OK || status == HttpURLConnection.HTTP_ACCEPTED ->
+                    CommandResponseParser.parseCommandResponse(responseBody)
                 status == HttpURLConnection.HTTP_UNAUTHORIZED || status == HttpURLConnection.HTTP_FORBIDDEN ->
                     CommandOutcome.Failed(BridgeFailure.Unauthorized(status))
                 status in 400..499 -> CommandResponseParser.parseProblem(responseBody)

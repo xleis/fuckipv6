@@ -33,7 +33,23 @@ class CommandBridgeTest {
             "set_network_role",
             envelope.getJSONObject("request").getJSONObject("command").getString("command"),
         )
-        assertEquals("k-1", envelope.getString("idempotency_key"))
+        val encodedKey = envelope.getString("idempotency_key")
+        assertTrue(
+            "idempotency_key must match authoritative contract ^idem_[A-Za-z0-9_-]{43}$: $encodedKey",
+            Regex("^idem_[A-Za-z0-9_-]{43}$").matches(encodedKey),
+        )
+        // Retrying the same logical key yields the exact same wire key.
+        assertEquals(
+            encodedKey,
+            JSONObject(CommandJson.envelope(command, requestId = 8, idempotencyKey = "k-1"))
+                .getString("idempotency_key"),
+        )
+        // Already-canonical keys pass through untouched.
+        assertEquals(
+            encodedKey,
+            JSONObject(CommandJson.envelope(command, requestId = 9, idempotencyKey = encodedKey))
+                .getString("idempotency_key"),
+        )
         assertFalse(JSONObject(CommandJson.envelope(command, requestId = 1)).has("idempotency_key"))
     }
 

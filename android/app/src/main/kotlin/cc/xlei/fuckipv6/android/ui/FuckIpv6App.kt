@@ -94,6 +94,36 @@ fun FuckIpv6App(
     issuedInvitationCode: String? = null,
     onCreateInvitation: (() -> Unit)? = null,
     onRevokeInvitation: ((cc.xlei.fuckipv6.android.bridge.InvitationView) -> Unit)? = null,
+    // W16 full Android platform & capability props (defaulted for backwards compatibility)
+    onStopDataPlaneOnly: (() -> Unit)? = null,
+    embeddedEndpoint: cc.xlei.fuckipv6.android.service.EmbeddedNodeEndpoint? = null,
+    nativeTelemetry: cc.xlei.fuckipv6.android.service.NativeNodeBridge.NativeTelemetry? = null,
+    onStartEmbeddedNode: (() -> Unit)? = null,
+    deviceEnv: cc.xlei.fuckipv6.android.platform.DeviceEnvironmentSnapshot? = null,
+    devicePolicy: cc.xlei.fuckipv6.android.platform.DevicePolicyDecision? = null,
+    onOpenBatterySettings: (() -> Unit)? = null,
+    trafficPolicy: cc.xlei.fuckipv6.android.bridge.TrafficPolicyDocument? = null,
+    trafficPolicyPreview: cc.xlei.fuckipv6.android.bridge.TrafficPolicyPreviewView? = null,
+    trafficPolicyTest: cc.xlei.fuckipv6.android.bridge.TrafficPolicyTestView? = null,
+    trafficPolicyHistory: List<cc.xlei.fuckipv6.android.bridge.TrafficPolicyRevisionView> = emptyList(),
+    onLoadTrafficPolicy: (() -> Unit)? = null,
+    onPreviewTrafficPolicy: ((String, String?, List<cc.xlei.fuckipv6.android.bridge.TrafficRuleItem>) -> Unit)? = null,
+    onApplyTrafficPolicy: ((String, String?, List<cc.xlei.fuckipv6.android.bridge.TrafficRuleItem>, Boolean) -> Unit)? = null,
+    onTestTrafficPolicy: ((String, String, String?, List<cc.xlei.fuckipv6.android.bridge.TrafficRuleItem>) -> Unit)? = null,
+    onRollbackTrafficPolicy: ((Long) -> Unit)? = null,
+    onCreateNetwork: ((String) -> Unit)? = null,
+    onJoinNetwork: ((String, String?) -> Unit)? = null,
+    onRefreshDiscovery: (() -> Unit)? = null,
+    safShares: List<cc.xlei.fuckipv6.android.platform.PersistedSafShare> = emptyList(),
+    safRevokedNotice: Boolean = false,
+    onPickSafFolder: (() -> Unit)? = null,
+    onVerifySafGrants: (() -> Unit)? = null,
+    onReleaseSafShare: ((String) -> Unit)? = null,
+    passkeyReauthValid: Boolean = false,
+    passkeyError: cc.xlei.fuckipv6.android.platform.PasskeyErrorKind? = null,
+    onVerifyPasskey: (() -> Unit)? = null,
+    onRegisterPasskey: (() -> Unit)? = null,
+    onClearAuthCache: (() -> Unit)? = null,
 ) {
     val systemLocale = LocalLocale.current.platformLocale
     val initialModule = contracts.navigation.modules.first()
@@ -219,6 +249,35 @@ fun FuckIpv6App(
                 issuedInvitationCode = issuedInvitationCode,
                 onCreateInvitation = onCreateInvitation,
                 onRevokeInvitation = onRevokeInvitation,
+                onStopDataPlaneOnly = onStopDataPlaneOnly,
+                embeddedEndpoint = embeddedEndpoint,
+                nativeTelemetry = nativeTelemetry,
+                onStartEmbeddedNode = onStartEmbeddedNode,
+                deviceEnv = deviceEnv,
+                devicePolicy = devicePolicy,
+                onOpenBatterySettings = onOpenBatterySettings,
+                trafficPolicy = trafficPolicy,
+                trafficPolicyPreview = trafficPolicyPreview,
+                trafficPolicyTest = trafficPolicyTest,
+                trafficPolicyHistory = trafficPolicyHistory,
+                onLoadTrafficPolicy = onLoadTrafficPolicy,
+                onPreviewTrafficPolicy = onPreviewTrafficPolicy,
+                onApplyTrafficPolicy = onApplyTrafficPolicy,
+                onTestTrafficPolicy = onTestTrafficPolicy,
+                onRollbackTrafficPolicy = onRollbackTrafficPolicy,
+                onCreateNetwork = onCreateNetwork,
+                onJoinNetwork = onJoinNetwork,
+                onRefreshDiscovery = onRefreshDiscovery,
+                safShares = safShares,
+                safRevokedNotice = safRevokedNotice,
+                onPickSafFolder = onPickSafFolder,
+                onVerifySafGrants = onVerifySafGrants,
+                onReleaseSafShare = onReleaseSafShare,
+                passkeyReauthValid = passkeyReauthValid,
+                passkeyError = passkeyError,
+                onVerifyPasskey = onVerifyPasskey,
+                onRegisterPasskey = onRegisterPasskey,
+                onClearAuthCache = onClearAuthCache,
             )
         }
     }
@@ -297,6 +356,36 @@ fun PageContent(
     issuedInvitationCode: String? = null,
     onCreateInvitation: (() -> Unit)? = null,
     onRevokeInvitation: ((cc.xlei.fuckipv6.android.bridge.InvitationView) -> Unit)? = null,
+    // W16 full Android platform & capability props (defaulted for backwards compatibility)
+    onStopDataPlaneOnly: (() -> Unit)? = null,
+    embeddedEndpoint: cc.xlei.fuckipv6.android.service.EmbeddedNodeEndpoint? = null,
+    nativeTelemetry: cc.xlei.fuckipv6.android.service.NativeNodeBridge.NativeTelemetry? = null,
+    onStartEmbeddedNode: (() -> Unit)? = null,
+    deviceEnv: cc.xlei.fuckipv6.android.platform.DeviceEnvironmentSnapshot? = null,
+    devicePolicy: cc.xlei.fuckipv6.android.platform.DevicePolicyDecision? = null,
+    onOpenBatterySettings: (() -> Unit)? = null,
+    trafficPolicy: cc.xlei.fuckipv6.android.bridge.TrafficPolicyDocument? = null,
+    trafficPolicyPreview: cc.xlei.fuckipv6.android.bridge.TrafficPolicyPreviewView? = null,
+    trafficPolicyTest: cc.xlei.fuckipv6.android.bridge.TrafficPolicyTestView? = null,
+    trafficPolicyHistory: List<cc.xlei.fuckipv6.android.bridge.TrafficPolicyRevisionView> = emptyList(),
+    onLoadTrafficPolicy: (() -> Unit)? = null,
+    onPreviewTrafficPolicy: ((String, String?, List<cc.xlei.fuckipv6.android.bridge.TrafficRuleItem>) -> Unit)? = null,
+    onApplyTrafficPolicy: ((String, String?, List<cc.xlei.fuckipv6.android.bridge.TrafficRuleItem>, Boolean) -> Unit)? = null,
+    onTestTrafficPolicy: ((String, String, String?, List<cc.xlei.fuckipv6.android.bridge.TrafficRuleItem>) -> Unit)? = null,
+    onRollbackTrafficPolicy: ((Long) -> Unit)? = null,
+    onCreateNetwork: ((String) -> Unit)? = null,
+    onJoinNetwork: ((String, String?) -> Unit)? = null,
+    onRefreshDiscovery: (() -> Unit)? = null,
+    safShares: List<cc.xlei.fuckipv6.android.platform.PersistedSafShare> = emptyList(),
+    safRevokedNotice: Boolean = false,
+    onPickSafFolder: (() -> Unit)? = null,
+    onVerifySafGrants: (() -> Unit)? = null,
+    onReleaseSafShare: ((String) -> Unit)? = null,
+    passkeyReauthValid: Boolean = false,
+    passkeyError: cc.xlei.fuckipv6.android.platform.PasskeyErrorKind? = null,
+    onVerifyPasskey: (() -> Unit)? = null,
+    onRegisterPasskey: (() -> Unit)? = null,
+    onClearAuthCache: (() -> Unit)? = null,
 ) {
     Column(
         modifier = modifier
@@ -362,10 +451,30 @@ fun PageContent(
                     }
                 }
             pageId == "settings" && settings != null ->
-                SettingsPageContent(contracts = contracts, locale = locale, data = settings)
+                SettingsPageContent(
+                    contracts = contracts,
+                    locale = locale,
+                    data = settings,
+                    passkeyReauthValid = passkeyReauthValid,
+                    passkeyError = passkeyError,
+                    onVerifyPasskey = onVerifyPasskey,
+                    onRegisterPasskey = onRegisterPasskey,
+                    onClearAuthCache = onClearAuthCache,
+                )
             pageId == "files" && fileBrowse != null && fileBrowseActions != null ->
                 Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                    files?.let { FilePageContent(contracts = contracts, locale = locale, data = it) }
+                    files?.let {
+                        FilePageContent(
+                            contracts = contracts,
+                            locale = locale,
+                            data = it,
+                            safShares = safShares,
+                            safRevokedNotice = safRevokedNotice,
+                            onPickSafFolder = onPickSafFolder,
+                            onVerifySafGrants = onVerifySafGrants,
+                            onReleaseSafShare = onReleaseSafShare,
+                        )
+                    }
                     FileBrowseContent(
                         contracts = contracts,
                         locale = locale,
@@ -386,7 +495,16 @@ fun PageContent(
                     }
                 }
             pageId == "files" && files != null ->
-                FilePageContent(contracts = contracts, locale = locale, data = files)
+                FilePageContent(
+                    contracts = contracts,
+                    locale = locale,
+                    data = files,
+                    safShares = safShares,
+                    safRevokedNotice = safRevokedNotice,
+                    onPickSafFolder = onPickSafFolder,
+                    onVerifySafGrants = onVerifySafGrants,
+                    onReleaseSafShare = onReleaseSafShare,
+                )
             pageId == "files" && filesFailureKey != null ->
                 SurfaceNotice(
                     state = SurfaceState(
@@ -399,7 +517,14 @@ fun PageContent(
             pageId == "networks" && onRefreshBlacklist != null ->
                 Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                     networks?.let {
-                        NetworksContent(contracts = contracts, locale = locale, networks = it)
+                        NetworksContent(
+                            contracts = contracts,
+                            locale = locale,
+                            networks = it,
+                            onCreateNetwork = onCreateNetwork,
+                            onJoinNetwork = onJoinNetwork,
+                            onRefreshDiscovery = onRefreshDiscovery,
+                        )
                     }
                     BlacklistContent(
                         contracts = contracts,
@@ -427,9 +552,25 @@ fun PageContent(
                     summaries = routing,
                     networkName = selectedNetworkName,
                     onUpdateRouting = onUpdateRouting,
+                    trafficPolicy = trafficPolicy,
+                    trafficPolicyPreview = trafficPolicyPreview,
+                    trafficPolicyTest = trafficPolicyTest,
+                    trafficPolicyHistory = trafficPolicyHistory,
+                    onLoadTrafficPolicy = onLoadTrafficPolicy,
+                    onPreviewTrafficPolicy = onPreviewTrafficPolicy,
+                    onApplyTrafficPolicy = onApplyTrafficPolicy,
+                    onTestTrafficPolicy = onTestTrafficPolicy,
+                    onRollbackTrafficPolicy = onRollbackTrafficPolicy,
                 )
             pageId == "networks" && networks != null ->
-                NetworksContent(contracts = contracts, locale = locale, networks = networks)
+                NetworksContent(
+                    contracts = contracts,
+                    locale = locale,
+                    networks = networks,
+                    onCreateNetwork = onCreateNetwork,
+                    onJoinNetwork = onJoinNetwork,
+                    onRefreshDiscovery = onRefreshDiscovery,
+                )
             pageId == "logs" && logs != null ->
                 LogsContent(contracts = contracts, locale = locale, feed = logs)
             pageId == "identity" && identity != null ->
@@ -446,6 +587,13 @@ fun PageContent(
                     tunnelControl = tunnelControl,
                     tunnelState = tunnelState,
                     onTunnelControl = onTunnelControl,
+                    onStopDataPlaneOnly = onStopDataPlaneOnly,
+                    embeddedEndpoint = embeddedEndpoint,
+                    nativeTelemetry = nativeTelemetry,
+                    onStartEmbeddedNode = onStartEmbeddedNode,
+                    deviceEnv = deviceEnv,
+                    devicePolicy = devicePolicy,
+                    onOpenBatterySettings = onOpenBatterySettings,
                 )
             pageId == "activity" && activity != null ->
                 ActivityContent(contracts = contracts, locale = locale, feed = activity)

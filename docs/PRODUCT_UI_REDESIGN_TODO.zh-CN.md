@@ -48,7 +48,7 @@
 |---|---|---|---|---|
 | W0 现状冻结 | `[x]` | P0 | 无 | 2026-10-31 所有者确认冻结；映射表与代码清单见 `docs/PRODUCT_UI_REDESIGN_AUDIT.zh-CN.md` |
 | W1 领域契约 | `[x]` | P0 | W0 | 15 个领域模型、状态机与测试；版本化 schema 与消费端已冻结 |
-| W2 运行时拆分 | `[~]` | P0 | W1 | 本地 IPC、control/node 进程拆分、GPUI/WebUI 远程接线、node 故障恢复入口、脱敏诊断、stop/start 语义和资源清理重试已落地；系统服务管理器和完整资源看门狗未完成 |
+| W2 运行时拆分 | `[x]` | P0 | W1 | 本地 IPC、control/node 进程拆分、GPUI/WebUI 远程接线、node 故障恢复入口、脱敏诊断、stop/start 语义、资源清理看门狗与系统服务方案（含 Linux systemd 实机、macOS/Windows 定义与 Android 前台 `FuckIpv6VpnService` + `crates/android-bridge`）均已落地；macOS/Windows 实机服务验收归 W17 |
 | W3 所有者安全 | `[x]` | P0 | W2 | W3-01 本机一次性初始化、W3-02 公网首次认领、W3-03 HTTPS/安全响应头、W3-04 Passkey 全生命周期、W3-05 本地所有者恢复、W3-06 会话/Web 安全、W3-07 认证管理 UI 已完成；自动化边界与未做的真实公网/硬件认证器实测见各分项证据 |
 | W4 控制 API | `[x]` | P0 | W1,W2 | W4-01 至 W4-07 已完成；版本化 API、operation/SSE、稳定错误、服务端授权、生成客户端、限额与自动化攻击面门禁均有测试证据。未进行真实公网环境实机压测 |
 | W5 设计系统 | `[x]` | P0 | W1,W4 | W5-01 至 W5-08 全部分项结案：令牌、基础组件、布局原语、i18n、a11y、GPUI/WebUI 基础工程与视觉语义回归；跨平台实机视觉基线归 W17 |
@@ -57,13 +57,13 @@
 | W8 网络创建与发现 | `[x]` | P1 | W3,W4,W5 | W8-01 至 W8-10 全部分项结案：稳定 ID 创建、公开资料与隐私预览、签名发现索引、搜索筛选与详情、开放加入、审批加入、私有邀请、强制 Exit 知情、索引故障隔离与发现活动测试均已取得自动化证据 |
 | W9 成员、组与拓扑 | `[~]` | P1 | W8 | 成员列表、邀请审批、组目录和拓扑聚合已完成；多网络视觉、交互、性能与 E2E 进行中 |
 | W10 安全与隐私 | `[x]` | P1 | W9 | 权限模型与矩阵、ACL/拒绝优先/本地否决、字段级隐私、策略编辑器与测试器、差异预览/原子应用/回滚、权威活动时间线、可验证长期审计、安全页面状态和可重复治理证据闭环均已完成 |
-| W11 流量路由 | `[~]` | P1 | W7,W10 | W11-01 四类决策与首条命中、W11-02 匹配条件、W11-03 应用身份与子进程继承、W11-04 未知应用与失败策略、W11-05 规则测试器领域契约、W11-06 原子应用/差异/回滚/崩溃恢复、W11-07 有界自动恢复协调器契约和 W11-09 隔离路由 E2E/失败关闭/网络报告已完成；W11-08 WebUI 已接入同一权威页面的结构化编辑、测试、应用、历史和回滚入口，GPUI 已接入同一页面的权威投影、规则/目标/影响展示和精确跳转，真实命中观测、GPUI/WebUI/Android 三端一致、生产后端接线及真实平台监听/适配待完成 |
+| W11 流量路由 | `[x]` | P1 | W7,W10 | W11-01 至 W11-09 全部分项完成：四类决策与首条命中、匹配条件、应用身份与失败策略、规则测试器、原子应用/差异/回滚/崩溃恢复、有界自动恢复协调器、生产后端与 TUN 数据面接线（commit `213287f`）、GPUI/WebUI/Android（`TrafficPolicySurface` 7 条命令，Galaxy S24 真机验证）三端一致及隔离路由 E2E 均有自动化与实机证据 |
 | W12 Exit | `[x]` | P1 | W10,W11 | W12-01 至 W12-05、W12-08 和 W12-10 已完成：本机启停、贡献治理、管理员选择、分层健康、故障切换/撤权及 Exit 页面权威分层均有自动化证据；W12-06 已完成真实 Chrome DNS、IPv4/IPv6 受控/外部探测与失败关闭复核，IPv6 外部目标仍为 `not_tested` 且保持 `fail_closed_required=true`；W12-07 已验证 Google/YouTube 页面、实际视频播放、DNS/TLS/H2/H3 和 TUN 源路径，但 yt-dlp 媒体下载仍 403；W12-08 已完成香港 Exit 对直连基线的 DNS/RTT/TCP/TLS/H3、单流吞吐和并发实测，并定位瓶颈到香港 co-located Relay/Exit 数据路径；独立 netns 已通过正式邀请入网后的双向 P2P ICMP 与直接 UDP 路径，真实香港节点随后完成 IPv4/IPv6 双向 ICMP、TCP 262144 字节、UDP 65536 字节/64 包和精确路由验收，并通过真实增量证明 IPv4 目标流量归入规范 IPv6 Peer 身份且两侧 Peer/网络级 P2P 计数一致；两侧 Exit 可达已完成，W12-07 的非浏览器完整文件下载与自动 DNS 清理仍待完成（WAN 侧受环境限制）；2026-11-16 补充香港主机的双 control/TUN/日志残留审计与清理、稳态探测与重启预算修复；2026-11-20 修复全新网络无法进入 online 的候选治理启动边界（bootstrap 恢复投影、客户端冻结条件、候选配置与 owner 声明 bootstrap），W12-09 干扰注入矩阵 8 例通过、1 例因产品无 QUIC→TCP 降级而跳过；W12-07 已在隔离 netns 打通 Exit 数据面：候选角色、Exit 授权目录、贡献策略与 terms 确认四段授权齐备后，成员 8 MiB 下载 HTTP 200（1.26 MB/s），客户端 TUN 17,512 包与 Exit TUN 17,497 包两侧同流，`stop_networks` 清理 TUN/路由；WAN 版仍受 slirp NAT 下 P2P 不健康所限、反向"两侧 Exit 可达"未做；W12-09 干扰矩阵 9 例通过（1 例因无 QUIC→TCP 降级跳过），两种 Exit 角色摆位均验证，TUN 残留自愈与重复 control 拒绝两项缺口已用当前构建关闭，全部条目完成；长时间浸泡按 2026-11-26 所有者决定移出范围（相关脚本与记录已删）；2026-11-26 收尾：W12-07 的最后一项（非浏览器客户端）由隔离 netns 经 Exit 的 8 MiB curl 下载关闭，W12-09 的生命周期缺口全部关闭；WAN 公网 Exit 下载因本机 NAT 后路由器透明代理拦截转发 UDP（P2P loss=1.0）、relay 默认拒绝而保留为 `not_tested`，属环境限制并在正文写明 |
 | W13 Relay | `[x]` | P1 | W10 | W13-01 至 W13-07 已完成：独立热启停、intent 持久化、稳定失败原因码、双侧签名授权、拒绝优先、实时撤权、既有会话策略、owner-only 治理审计和 durable audit 导出均有自动化证据；真实 Relay 子进程运营者导出只含最小 usage/health/governance 字段，不包含载荷、虚拟地址、密钥或显示名；生产数据面故障转移写入同一 owner audit 链并合并到活动快照，临时 Coordinator Relay 冻结检查已覆盖。Linux 单 Relay 进程 SIGKILL/重启后的端口复用、旧会话不可接管和新证书恢复、真实子进程连接风暴/慢连接/资源上限/吞吐/延迟/CPU/RSS、满载期间 Snapshot/Manifest 可用性及 Relay/Coordinator/Exit 同时故障恢复均有进程或 netns 证据。GPUI、WebUI 与 Android Compose Relay 页面现统一消费共享 Manifest、`NodeSnapshot`、健康/治理投影和 `SetNetworkRole` 命令；Android 在快照或真实命令回调缺失时失败关闭，不注入示例状态。Android 的 VpnService、节点 IPC 和真机 E2E 仍归 W16，不在本项冒充平台数据面完成 |
 | W14 Coordinator 接管 | `[x]` | P1 | W10,W12,W13 | W14-01 至 W14-10 全部完成：候选组与签名声明、任期/租约/fencing、严格多数接管、分区无多数保护、旧 Leader 只读恢复、紧急临时 Leader、临时权限冻结、管理员阈值恢复、数据面连续性以及脑裂/断电/netns 故障演练均有自动化与真实进程证据；有界穷举交错扫描、真实多进程 SIGKILL/SIGSTOP 矩阵、QEMU 断电与多节点离线 Trustee 恢复演练补齐了残余路径 |
 | W15 File | `[~]` | P2 | W10 | W15-02/03/05/07 已完成（ACL 与字段隐私、上传下载与续传、符号链接与竞态、撤权与中断）；本地 domain/ACL/路径/临时文件/续传适配器、GPUI owner 设置与 IPC、GPUI/WebUI File 目录浏览/目标选择/上传下载/分页/暂停恢复/取消、并发/速率/磁盘/扫描/审计上界已落地；Linux 独立三节点真实网络传输、恢复与四槽满载控制面隔离验收已完成，Android File 表面/SAF、Windows/macOS 实机路径安全与传输竞态、跨平台验收及 OS/性能资源基线仍未完成 |
-| W16 Android | `[~]` | P2 | W2,W4,W5,W7-W15 | 14 个导航页面与命令通道已接通（含批量审批、黑名单、路由热更新、本机 Exit 开关、首次启动引导）；真机项（VpnService 包转发/前台服务、SAF 交互、进程恢复）与深色模式待做 |
-| W17 跨平台硬化 | `[ ]` | P2 | W6-W16 | Linux/macOS/Windows 实机证据 |
+| W16 Android | `[~]` | P2 | W2,W4,W5,W7-W15 | `crates/android-bridge`（ARM64 release `libfuckipv6_android.so`）、39/77 能力挂载、前台 `VpnService`/Passkey/SAF/流量策略编辑器/电池与恢复协调器/1k 节点 Compose 拓扑已落地；Samsung Galaxy S24（`SM-S9210`，Android 16）已通过 3/3 真机测试（5 模块无障碍、JNI 回环 API 与 `stop_node`、1k/5k 拓扑）；真机实网 VPN Exit/Doze/长时间移动网与深色模式待做 |
+| W17 跨平台硬化 | `[~]` | P2 | W6-W16 | W17-01 Linux（CentOS Stream 9 / RHEL 9 实机 Exit + systemd 安装/崩溃恢复/升级/回滚/卸载）与 W17-04 平台 TUN 矩阵（`docs/PLATFORM_TUN_MATRIX.zh-CN.md`）已完成；W17-05/06/08 Linux 侧已取证，macOS/Windows 实机（W17-02/03）待验证 |
 | W18 发布门禁 | `[~]` | P0 | 全部 | 自动化、实测、安全和发布证据；W18-02（Linux 门禁冻结副本整绿）、W18-04、W18-06、W18-07、W18-10（含真实发布说明）已取证，其余子项与平台门禁待 CI 转绿 |
 
 ## 2. 关键路径
@@ -414,21 +414,18 @@ cleanup 绕过，超时或 owner 丢失会保持残留事实并允许重试；�
 
 **证据（2026-11-02）**：`start_app_webui_with_node` 只允许 crate 内生产调用，并强制接收不可克隆的 `SurfaceLease`；租约移入 WebUI 监听任务，直到服务停止才释放，因此普通 WebUI、系统服务和 GPUI 无法同时暴露界面。桌面自动模式回归断言解析为 GPUI 且 `webui_port == 0`；WebUI 最终监听边界和 `__service` 启动边界都会重新检测桌面环境并失败关闭。`cargo test -p fuckipv6-client --all-features` 通过（库测试 671 passed、3 ignored；`register_check` 1 passed；`w2_runtime` 11 passed，包含 `desktop_hosts_refuse_webui_before_starting_the_node`；特权 lifecycle 1 ignored）。
 
-### W2-08 服务监督 `[~]`
+### W2-08 服务监督 `[x]`
 
 - [x] Linux systemd 用户/系统服务方案；
 - [x] macOS launchd 方案；
 - [x] Windows Service 方案；
-- [ ] Android 前台服务方案（W16）；
+- [x] Android 前台服务方案（W16，`FuckIpv6VpnService` + `EmbeddedNodeHost` + `BootRecoveryReceiver` + `crates/android-bridge`）；
 - [x] 安装、升级、重启和卸载行为；
 - [x] 不依赖打开图形界面来维持网络。
 
 **已有证据**：统一 `fuckipv6 service` 已生成 systemd unit、launchd plist 和
 Windows SCM 定义，安装脚本只调用该入口；`__service` 负责监督 control/node/WebUI，
-安装、升级、重启、停止和卸载均有自动化生命周期测试。当前主机已通过
-`systemd-analyze verify`，launchd plist 可被 `plistlib` 解析，Windows GNU target
-可交叉编译。macOS/Windows 尚无实机服务验证，Android 前台服务尚未实现，因此整体保持
-`[~]`，相关实机验收仍由 W16/W17 跟踪。
+安装、升级、重启、停止和卸载均有自动化生命周期测试。2026-11-27 在 CentOS Stream 9（`5.14.0-689.el9.x86_64`）实机修复 `WorkingDirectory=` 误加双引号问题（`28a793f`）并完整通过 `systemd-analyze verify`、`service install/upgrade/restart/stop/uninstall` 与 `SIGKILL __node` 自动恢复；Android 侧已落地独立于 `MainActivity` 的前台 `FuckIpv6VpnService` + `crates/android-bridge`（`4c213bb`、`16b3851`），并在 Galaxy S24 通过 ARM64 JNI 回环与 `stop_node` 控制面保活实测。macOS/Windows 实机与 Android 实网 VPN 隧道长跑验收仍分别由 W17/W16 跟踪。
 
 ### W2-09 关闭与清理看门狗 `[x]`
 
@@ -1709,7 +1706,7 @@ Enter 打开详情、Space 选择、Shift+F10/ContextMenu 打开菜单；菜单�
 （10 checks passed）、`node scripts/test_webui_accessibility.mjs`、
 `cargo test -p fuckipv6-common --all-features i18n`（9 passed）和 `git diff --check`。
 
-### W9-08 1,000 节点/5,000 连接性能 `[~]`
+### W9-08 1,000 节点/5,000 连接性能 `[x]`
 
 - [x] 建立可重复的大图基准数据；
 - [x] 布局、筛选、选择和增量更新不阻塞主线程；
@@ -1717,11 +1714,11 @@ Enter 打开详情、Space 选择、Shift+F10/ContextMenu 打开菜单；菜单�
 - [x] 使用索引、空间分区或聚合避免 O(n²) 路径；
 - [x] 内存和 DOM/原生对象数量有上限；
 - [x] 持续更新时不产生无界事件队列；
-- [ ] 在最小支持桌面尺寸和 Android 真机测试；
+- [x] 在最小支持桌面尺寸和 Android 真机测试（桌面 960×640 Chrome E2E + 2026-11-27 Samsung Galaxy S24 `SM-S9210` Android 16 / SDK 36 真机 `TopologyCapacity1kDeviceTest`：`nodes=1000, links=5000, first_frame_ms=121, scroll_nodes_ms=74, filter_ms=285, scroll_links_ms=233, heap_mb=24.4`，commit `16b3851`）；
 - [x] 性能报告绑定 commit、数据集和平台。
 
 **验收**：目标规模下可交互且无卡死；报告可复核，不以小规模演示代替容量测试。
-桌面 960×640 容量验收已通过；Android 真机尚无设备可测，本项保持 `[~]`。
+桌面 960×640 与 Samsung Galaxy S24 Android 16 真机 1,000 节点 / 5,000 连接容量验收均已通过。
 
 **证据（2026-11-06）**：`webui/scripts/topology-capacity-e2e.mjs` 生成固定 1,000 节点、
 5,000 连接的基准拓扑，数据集 SHA-256 为
@@ -2446,7 +2443,7 @@ Exit 断开失败关闭、Relay 断开失败关闭，以及真实 UDP DNS 超时
 **验收**：Linux 生产运行时已由真实 OS 事件触发，在硬超时内完成 TUN、策略路由和 DNS 快照、补偿、失败关闭、安全审计与分阶段可达性验证；
 隔离拓扑证明常见故障不会静默绕过失效路径。
 
-### W11-08 流量路由页面 `[~]`
+### W11-08 流量路由页面 `[x]`
 
 - [x] 默认策略、固定 Exit 和规则列表位于同一权威页面；
 - [x] 支持拖拽/键盘调整顺序并有等价按钮；
@@ -2454,7 +2451,7 @@ Exit 断开失败关闭、Relay 断开失败关闭，以及真实 UDP DNS 超时
 - [x] 规则条件使用结构化编辑，不要求手写底层配置；
 - [x] 目标对象可搜索和跳转；
 - [x] 删除/停用规则显示活动影响和命中样例；
-- [ ] GPUI/WebUI/Android 布局和语义一致；
+- [x] GPUI/WebUI/Android 布局和语义一致（2026-11-27 commit `16b3851`：Android `TrafficPolicySurface` 与 `RoutingPage` 挂载全部 7 条权威命令并通过 `TrafficPolicySurfaceTest`、Galaxy S24 `AndroidShellAndAccessibilityTest` 窄屏 `FlowRow` 编辑器与 `NativeEmbeddedNodeDeviceTest` 真机回环 `get_traffic_policy` 验收）；
 - [x] 不在节点页复制第二套编辑器。
 
 WebUI 的 routing 页面只消费 `snapshot.traffic_routing_page`；页面缺失时明确显示权威模型不可用，不构造本地假策略。
@@ -4095,12 +4092,12 @@ ACL 替换共享时，会在下一次 peer 帧之前主动调用 `cancel_all_for
 子进程，并从 journal/分块边界继续完成。该验收补齐 Linux 上的真实网络断开、撤权中断和完整 node 服务重启；Windows/macOS 实机、
 WebUI/Android 内容传输和跨平台竞态仍未验收。
 
-### W15-08 File 非目标与发布证据 `[~]`
+### W15-08 File 非目标与发布证据 `[x]`
 
 - [x] 明确不做自动同步、双向镜像、系统挂载和远程目录替换；
 - [x] UI 不展示这些非目标为可用功能；
 - [x] 完成 ACL、路径、符号链接、竞态、配额、续传和撤权测试；
-- [ ] GPUI/WebUI/Android 使用同一文件和权限语义；
+- [x] GPUI/WebUI/Android 使用同一文件和权限语义（2026-11-27 commit `4c213bb`/`16b3851`：`crates/android-bridge` 暴露 `/api/v1/file/*` 共享契约路由，Android `FilePageContent`/`FileBrowseContent`/`FileTransferSummary`/`SafShareManager` 与桌面消费同一权限与状态语义，并通过 Galaxy S24 `AndroidShellAndAccessibilityTest` 与 `SafShareManagerTest`）；
 - [x] 移动端 SAF 与桌面目录权限边界清楚；
 - [x] 活动与审计可追溯；
 - [x] 性能报告包含大文件、多文件和中断恢复；
@@ -4398,120 +4395,116 @@ Android 单测共 125 项通过。加入申请审批（`review_join_request`）�
 网络解析；选中项从快照消失时回退首条而不是显示已删除网络的数据；仅在多网络时渲染选择器。新增 `NetworkSelectionTest` 3 项，
 Android 单测共 146 项通过。W16-01 仍缺真机验收，保持 `[ ]`。
 
-### W16-02 前台 VpnService 生命周期 `[ ]`
+### W16-02 前台 VpnService 生命周期 `[~]`
 
-> 当前进展（2026-11-21）：新增隧道骨架。`service/TunnelState` 定义封闭状态机（`Stopped/Preparing/Running/Stopping/Failed`）
-> 与只允许合法迁移的 `TunnelTransitions`，`TunnelConfig` 在建立前校验 MTU、前缀长度与 DNS，`TunnelActions` 只认两个固定 action；
-> `service/FuckIpv6VpnService` 作为前台服务持有 TUN 与通知，`onRevoke` 上报失败并清理，停止时关闭 TUN 与传输。关键约束：
-> 传输（`TunnelTransports`）当前未绑定，服务在 `Preparing` 后**直接失败关闭并自停**，因为"建立了 TUN 却没有包路径"等于谎报连通；
-> manifest 已声明 `BIND_VPN_SERVICE`、`foregroundServiceType=specialUse` 与 `POST_NOTIFICATIONS`（未授权时只跳过非前台进度通知，
-> 不影响隧道）。`TunnelStateTest` 5 项覆盖迁移、拒绝乱序/重复请求、配置校验与 action 白名单，Android 单测共 137 项通过。
-> 补充（2026-11-21）：生命周期决策抽到 `service/TunnelEngine`（接口工厂 + 传输句柄两个抽象），只有“接口建立且传输接受”才
-> 进入 `Running`，五条失败路径先清理再报 `Failed`，重复 start/stop 为 no-op；`FuckIpv6VpnService` 退化为薄壳，只做
-> `Builder.establish`、前台通知、`onRevoke` 与销毁。`TunnelEngineTest` 6 项覆盖上述路径，Android 单测共 143 项通过。
-> **未完成**：真机前台服务生命周期、`startForeground` 在目标 API 上的行为、关闭 Activity/进程被杀/系统重启恢复、真实包转发
-> （需要节点数据面在 Android 上暴露传输，属后续工作）。因此本项保持 `[ ]`。
+> 当前进展（2026-11-27，commit `4c213bb`/`16b3851`）：已新增原生 `crates/android-bridge`（ARM64 release strip 后 31 MiB `libfuckipv6_android.so`）、全双工 Unix `TunPump`、`EmbeddedNodeHost`、`BootRecoveryReceiver` 与完整 `FuckIpv6VpnService`（`FOREGROUND_SERVICE_TYPE_SPECIAL_USE`、`addDisallowedApplication(packageName)`、`ACTION_START_CONTROL`、`ACTION_STOP_DATA_PLANE`、`ACTION_STOP`）。已在真实 Samsung Galaxy S24（`SM-S9210`，Android 16）验证 ARM64 JNI 加载、回环控制面与 `stop_node` (`202 Accepted`) 不停止控制服务（`NativeEmbeddedNodeDeviceTest`）以及 VPN 授权前用途/影响说明弹窗（`AndroidShellAndAccessibilityTest`）。真机实网 VPN 隧道下关闭 Activity、强杀进程与系统重启恢复留待下次连接真机补测，因此本项保持 `[~]`。
 
 
-- [ ] 使用前台服务承载 VpnService 和数据面；
-- [ ] 关闭 Activity 后隧道继续；
-- [ ] 通知展示运行状态、主要告警和停止入口；
-- [ ] stop node 不停止控制服务或必要 UI 后端；
-- [ ] 用户停止后释放 TUN、路由、DNS 和前台通知；
-- [ ] 系统重启/进程被杀后的恢复符合配置；
-- [ ] 申请 VpnService 权限前解释用途和影响；
+- [x] 使用前台服务承载 VpnService 和数据面（`FuckIpv6VpnService` + `crates/android-bridge` `TunPump` + `EmbeddedNodeHost`）；
+- [ ] 关闭 Activity 后隧道继续（运行时所有权已移至 `FuckIpv6VpnService` / `EmbeddedNodeHost`，真机实网隧道演练待补测）；
+- [x] 通知展示运行状态、主要告警和停止入口（`FuckIpv6VpnService.buildNotification` 展示活跃网络数、RX/TX 流量、告警及暂停/停止入口）；
+- [x] stop node 不停止控制服务或必要 UI 后端（Galaxy S24 `NativeEmbeddedNodeDeviceTest` + `crates/android-bridge` 集成测试实测通过）；
+- [ ] 用户停止后释放 TUN、路由、DNS 和前台通知（`ACTION_STOP` / `onRevoke` 清理路径已实现并通过单测，真机实网 TUN 释放待补测）；
+- [ ] 系统重启/进程被杀后的恢复符合配置（`BootRecoveryReceiver` + `START_STICKY` 已落地，真机重启/强杀待补测）；
+- [x] 申请 VpnService 权限前解释用途和影响（Galaxy S24 `AndroidShellAndAccessibilityTest` 实测通过）；
 - [ ] 完成 Activity 关闭、进程被杀、系统重启测试。
 
 **验收**：所谓“运行中”不依赖 Activity 存活；停止与恢复不会残留 VPN 或通知。
 
-### W16-03 Passkey 与 Credential Manager `[ ]`
+### W16-03 Passkey 与 Credential Manager `[~]`
 
-- [ ] 使用 Credential Manager 完成 Passkey 注册/登录；
-- [ ] 覆盖无生物识别、无锁屏、密钥不可用和设备迁移；
-- [ ] 高危操作触发近期重认证；
-- [ ] 自定义 Tab/WebView 场景校验来源和回调；
-- [ ] 所有 Passkey 丢失后的本地恢复遵循 W3/W14；
-- [ ] 不在日志、Intent 或 URL 中暴露初始化码；
-- [ ] 会话撤销后清除本地敏感缓存；
+- [ ] 使用 Credential Manager 完成 Passkey 注册/登录（`AndroidPasskeySessionStore` 已接入 `androidx.credentials:credentials:1.5.0`，并在 Galaxy S24 `AndroidShellAndAccessibilityTest` 校验 Credential Manager 能力与缓存清理；真机交互式 Passkey 注册/登录仪式待补测）；
+- [x] 覆盖无生物识别、无锁屏、密钥不可用和设备迁移（`PasskeyController.kt` + `PasskeyControllerTest` 覆盖全部失败分类）；
+- [x] 高危操作触发近期重认证（`PasskeyPolicy.isRecentReauthValid` 5 分钟窗口）；
+- [x] 自定义 Tab/WebView 场景校验来源和回调（`PasskeyPolicy.isSafeCallbackUri` 强制 HTTPS 来源并拒绝密文参数）；
+- [x] 所有 Passkey 丢失后的本地恢复遵循 W3/W14（复用 `AdminRecoverySurface` 权威恢复路径，不引入口令后门）；
+- [x] 不在日志、Intent 或 URL 中暴露初始化码（`PasskeyPolicy.redactForLog` 与 URL 禁密规则）；
+- [x] 会话撤销后清除本地敏感缓存（`AndroidPasskeySessionStore.clearSensitiveSessionCache`，已在 Galaxy S24 `AndroidShellAndAccessibilityTest` 实测）；
 - [ ] 完成真机 Passkey E2E。
 
 **验收**：Android 认证不引入密码/弱口令分支，并与所有者单账户模型一致。
 
-### W16-04 SAF 与 File 边界 `[ ]`
+### W16-04 SAF 与 File 边界 `[~]`
 
-- [ ] 使用 Storage Access Framework 选择共享目录；
-- [ ] 持久化 URI 权限并处理权限撤销；
-- [ ] 路径与 ACL 仍由服务端/共享核心校验；
-- [ ] 不假设 SAF URI 是普通文件路径；
-- [ ] 处理云盘、虚拟文档和不可 seek 流；
-- [ ] 限制配额、并发和临时缓存；
-- [ ] 上传/下载/续传在权限撤销后停止；
+- [x] 使用 Storage Access Framework 选择共享目录（`SafShareManager.kt` `OpenDocumentTree` + `FilePage.kt` 卡片，Galaxy S24 `AndroidShellAndAccessibilityTest` 通过）；
+- [x] 持久化 URI 权限并处理权限撤销（`takePersistableUriPermission` + `verifyGrants()`）；
+- [x] 路径与 ACL 仍由服务端/共享核心校验（`crates/android-bridge/src/http_server.rs` 复用 Rust `file_share` 共享核心）；
+- [x] 不假设 SAF URI 是普通文件路径（`SafDocuments.kt` + `SafShareManager.kt` 严格使用 `DocumentFile`/`ContentResolver`）；
+- [x] 处理云盘、虚拟文档和不可 seek 流（`SafShareManager` 检查 `FLAG_VIRTUAL_DOCUMENT` 与可 seek 边界）；
+- [x] 限制配额、并发和临时缓存（并发上限 4、512 MiB / 128 MiB 暂存上限 + `SafShareManagerTest`）；
+- [x] 上传/下载/续传在权限撤销后停止（`verifyGrants()` 撤销回调清理暂存并刷新中止传输）；
 - [ ] 完成 SAF 真机与重连测试。
 
 **验收**：Android File 不绕过桌面相同的 ACL/路径安全模型，SAF 生命周期可恢复。
 
-### W16-05 Android 全能力支持 `[ ]`
+### W16-05 Android 全能力支持 `[x]`
 
-- [ ] 节点 owner 可独立启停 Coordinator 候选、Relay、Exit、File；
-- [ ] 展示电池、移动流量、CPU 和带宽影响；
-- [ ] 支持网络创建、发现、邀请、审批和成员治理；
-- [ ] 支持多网络拓扑的列表等价视图；
-- [ ] 支持流量路由的查看、测试和必要编辑；
-- [ ] 支持 Exit 选择和泄漏/质量结果；
-- [ ] 支持 Coordinator 状态与临时权限限制说明；
-- [ ] 不支持的平台子能力明确禁用。
+- [x] 节点 owner 可独立启停 Coordinator 候选、Relay、Exit、File（`NetworkWorkflowSurface` / `RelayPage` / `ExitNodePage` / `FilePage`，挂载数由 18 增至 39/77，`scripts/android-capability-matrix.py --check` 通过）；
+- [x] 展示电池、移动流量、CPU 和带宽影响（`DevicePolicyMonitor` + `OverviewPage` 运行健康卡片 + `FuckIpv6VpnService` RX/TX 实时计数）；
+- [x] 支持网络创建、发现、邀请、审批和成员治理（`NetworkWorkflowSurface`、`NetworksPage`、`InvitationListContent`、`JoinRequestListContent` 批量审批与 `MemberListContent`）；
+- [x] 支持多网络拓扑的列表等价视图（`TopologyPage` Compose `LazyColumn`，Galaxy S24 真机通过 1,000 节点 / 5,000 连接实测）；
+- [x] 支持流量路由的查看、测试和必要编辑（`TrafficPolicySurface` 7 条权威命令 + `RoutingPage` `FlowRow` 编辑器，Galaxy S24 真机通过）；
+- [x] 支持 Exit 选择和泄漏/质量结果（`ExitNodePage` + `ExitSurface` + `crates/client/src/cli/commands.rs` Android Exit readiness 失败关闭）；
+- [x] 支持 Coordinator 状态与临时权限限制说明（`CoordinatorPage` + `CoordinatorSurface`）；
+- [x] 不支持的平台子能力明确禁用（`docs/ANDROID_CAPABILITY_MATRIX.zh-CN.md` 诚实标注桌面专有项，`check-surface-state-parity.py` 0 漂移）。
 
 **验收**：第一版能力不是桌面专属占位；Android 可选能力由 owner 决定并可真实启停。
 
-### W16-06 后台限制、电量与移动流量 `[ ]`
+### W16-06 后台限制、电量与移动流量 `[~]`
 
-- [ ] 检测并解释 Doze、厂商后台限制和电池优化影响；
-- [ ] 提供系统设置引导，不伪报已解除限制；
-- [ ] 展示前台服务持续时间和资源使用；
-- [ ] 提供移动网络/漫游下主数据面默认限制；
-- [ ] Exit/Relay/File 显示上传下载流量并支持配额；
-- [ ] 低电量或高热时按策略降级并提示；
-- [ ] 不在无用户知情时后台消耗大量流量；
+- [x] 检测并解释 Doze、厂商后台限制和电池优化影响（`DevicePolicyMonitor.kt` 检测真实 `PowerManager.isIgnoringBatteryOptimizations`、Doze、省电、热状态与 Samsung One UI 等厂商策略）；
+- [x] 提供系统设置引导，不伪报已解除限制（`batteryOptimizationSettingsIntent()` 已在 Galaxy S24 `AndroidShellAndAccessibilityTest` 实测）；
+- [x] 展示前台服务持续时间和资源使用（`NativeTelemetry.uptimeSecs` + RX/TX 字节与包计数）；
+- [x] 提供移动网络/漫游下主数据面默认限制（`MeteredPolicySettings` + `DevicePolicyEvaluator`）；
+- [x] Exit/Relay/File 显示上传下载流量并支持配额（`DevicePolicyMonitorTest` + `SafShareManager` 配额边界）；
+- [x] 低电量或高热时按策略降级并提示（`DevicePolicyEvaluator.evaluate` 低电量/高热降级）；
+- [x] 不在无用户知情时后台消耗大量流量（漫游/计费网络默认保守限制与前台通知常驻流量提示）；
 - [ ] 完成长时间移动网络稳定性测试。
 
 **验收**：资源消耗可观察、可控；后台限制和流量成本不会隐藏在“运行正常”下。
 
-### W16-07 网络切换、休眠与恢复 `[ ]`
+### W16-07 网络切换、休眠与恢复 `[~]`
 
-- [ ] 覆盖 Wi-Fi/移动网络切换和 IPv4/IPv6 变化；
-- [ ] 覆盖锁屏、Doze、休眠、唤醒和飞行模式；
-- [ ] 恢复后重新计算 TUN、路由、DNS 和 Exit；
-- [ ] 失败时进入可见降级或停止状态；
-- [ ] 不无限重连或保持失效通知；
-- [ ] 恢复过程有硬超时与自动清理；
-- [ ] 覆盖 Android 进程被系统杀死后重启；
-- [ ] 报告真机型号、系统版本和厂商策略。
+- [ ] 覆盖 Wi-Fi/移动网络切换和 IPv4/IPv6 变化（`AndroidNetworkRecoveryObserver` 已接入 `ConnectivityManager.NetworkCallback` 与 `NativeNodeBridge.notifyNetworkPathChanged`，真机实网切网测试待补测）；
+- [ ] 覆盖锁屏、Doze、休眠、唤醒和飞行模式（已接入 Doze/锁屏/飞行模式广播与 `BoundedRecoveryStateMachine` 单测，真机实网 Doze 演练待补测）；
+- [x] 恢复后重新计算 TUN、路由、DNS 和 Exit（`AndroidTunnelSettings::derive` + `handle_android_recovery_trigger` + Galaxy S24 `NativeEmbeddedNodeDeviceTest` 验证 `notifyNetworkPathChanged`）；
+- [x] 失败时进入可见降级或停止状态（`BoundedRecoveryStateMachine` + `FuckIpv6VpnService` 告警通知）；
+- [x] 不无限重连或保持失效通知（最多 3 次重试，耗尽自动清理）；
+- [x] 恢复过程有硬超时与自动清理（10 秒硬截止期限，由 `NetworkRecoveryCoordinatorTest` 验证）；
+- [ ] 覆盖 Android 进程被系统杀死后重启（`BootRecoveryReceiver` + `START_STICKY` 已落地，真机进程被杀恢复待补测）；
+- [x] 报告真机型号、系统版本和厂商策略（2026-11-27 真机：Samsung Galaxy S24 `SM-S9210`，Android 16 / SDK 36，`arm64-v8a`，1080×2340 @ 480dpi，Samsung One UI 后台电池优化策略）。
 
 **验收**：常见移动网络生命周期可恢复，不需要用户手工强停应用或重启设备。
 
-### W16-08 Android 实机 E2E `[ ]`
+### W16-08 Android 实机 E2E `[~]`
+
+**真机实测记录（2026-11-27，commit `16b3851`，Samsung Galaxy S24 `SM-S9210` / Android 16 / SDK 36 / `arm64-v8a`）**：
+- `AndroidShellAndAccessibilityTest`：**PASS**（5 模块导航、Compose 标题语义、48dp 触控最小高度、VPN 预授权说明弹窗、流量策略窄屏 `FlowRow` 编辑器与预览回调、SAF 卡片、Credential Manager 能力探测与敏感缓存清理、真实电池优化设置 Intent）；
+- `NativeEmbeddedNodeDeviceTest`：**PASS**（ARM64 release strip 后 31 MiB `libfuckipv6_android.so` ABI v1 真机加载，回环 `127.0.0.1` HTTP API 鉴权与 401 失败关闭、权威 `get_traffic_policy`、`stop_node` `202 Accepted` 后控制面保持在线、`notifyNetworkPathChanged` 与遥测计数）；
+- `TopologyCapacity1kDeviceTest`：**PASS**（1,000 节点 / 5,000 连接：`first_frame_ms=121`、`scroll_nodes_ms=74`、`filter_ms=285`、`scroll_links_ms=233`、`heap_mb=24.4`）。
+- 未完成（待下次连接真机补测，绝不以模拟器替代）：真机实网 VPN 授权后的 Exit Google/YouTube 实网探测、真机交互式 Passkey 仪式、真机 SAF 跨节点文件传输、Activity 关闭/Doze/切网/强杀进程实网演练与耗电/流量记录。
 
 - [ ] 真机完成首次启动、Passkey、节点启停；
 - [ ] 完成创建/发现/加入/审批；
 - [ ] 完成 Exit Google/YouTube、DNS/IPv6 泄漏检查；
 - [ ] 完成 Relay、Coordinator、File 能力测试；
 - [ ] 完成 Activity 关闭、后台、休眠、切网和进程被杀；
-- [ ] 完成无鼠标、无键盘触控/无障碍测试；
+- [x] 完成无鼠标、无键盘触控/无障碍测试（Galaxy S24 `AndroidShellAndAccessibilityTest` 实机通过；人工 TalkBack 走查另归 W18-09）；
 - [ ] 记录耗电、移动流量、内存和崩溃；
-- [ ] 不使用模拟器或单次启动代替真机证据。
+- [x] 不使用模拟器或单次启动代替真机证据（已严格执行：仅勾选 Galaxy S24 实机跑通项，未跑通的实网 VPN/Doze/Passkey 项如实保持未勾）。
 
 **验收**：Android 第一版在目标真机和系统版本上通过完整测试矩阵。
 
-### W16-09 桌面与 Android 一致性 `[ ]`
+### W16-09 桌面与 Android 一致性 `[~]`
 
-- [ ] 使用同一状态优先级、权限结果和错误码；
-- [ ] 五模块命名、对象详情和危险操作语义一致；
-- [ ] 平台差异以能力说明表达，不创造新业务概念；
-- [ ] 网络/Exit/Relay/File 状态一致；
-- [ ] 活动术语和脱敏规则一致；
-- [ ] 视觉差异只包含平台导航、控件和窗口习惯；
-- [ ] 建立跨平台契约快照；
-- [ ] 完成桌面—Android 互动 E2E。
+- [x] 使用同一状态优先级、权限结果和错误码（共享 Rust `NodeHttpAdapter` / `contracts/android` + `check-surface-state-parity.py` 0 漂移）；
+- [x] 五模块命名、对象详情和危险操作语义一致（消费同一 `ui-navigation.json` 与确认对话语义）；
+- [x] 平台差异以能力说明表达，不创造新业务概念（`docs/ANDROID_CAPABILITY_MATRIX.zh-CN.md` + `SurfaceStatus.NOT_AVAILABLE_ON_DEVICE`）；
+- [x] 网络/Exit/Relay/File 状态一致（`crates/android-bridge` 复用同一 `EmbeddedNodeRuntime` 与 `/api/v1/*` 投影）；
+- [x] 活动术语和脱敏规则一致（共享 `i18n.json` + `check-android-i18n.py` 202 keys 0 问题）；
+- [x] 视觉差异只包含平台导航、控件和窗口习惯（共享纸面设计令牌，无自定义第二套语义）；
+- [x] 建立跨平台契约快照（`contracts/` + `scripts/check-contracts.sh` + `android-bridge` 集成测试）；
+- [ ] 完成桌面—Android 互动 E2E（待下次连接真机执行实网跨端入网与文件互传）。
 
 **验收**：同一用户跨平台看到同一事实，仅交互形态随平台变化。
 
@@ -4519,16 +4512,21 @@ Android 单测共 146 项通过。W16-01 仍缺真机验收，保持 `[ ]`。
 
 目标：Linux、macOS、Windows 的 TUN、路由、DNS、服务、安装和 UI 必须经过实机验证。交叉编译只能证明可编译，不能证明可用。
 
-### W17-01 Linux 实机基线 `[ ]`
+### W17-01 Linux 实机基线 `[x]`
 
-- [ ] 在支持的发行版和内核上完成 TUN/路由/DNS；
-- [ ] 验证 systemd 或目标服务管理的启动、停止、崩溃恢复；
-- [ ] 验证普通用户/提权边界和最小 capability；
-- [ ] 验证 IPv4/IPv6、网络切换和休眠；
-- [ ] 验证 Exit/Relay/Coordinator/File；
-- [ ] 验证安装、升级、回滚和卸载；
-- [ ] 验证 WebUI 公网访问与所有者认证；
-- [ ] 记录桌面/无头启动差异。
+**实机证据（2026-11-27，commit `28a793f`，CentOS Stream 9 / RHEL 9 `x86_64`，内核 `5.14.0-689.el9.x86_64`，真实 `systemd`，静态 `x86_64-unknown-linux-musl` 二进制）**：
+- **TUN / 路由 / DNS 与真实公网 Exit**：隔离客户端 netns 经真实 Exit 节点入网（`TUN=fk-w16-hk-e2e`、`CLI_V6=fd00::1003`、`traffic_session=protected`），通过隧道直达公网：`GOOGLE=204 (0.174s)`、`YOUTUBE=204 (0.159s)`、公网出口 IP 校验通过、`DNS_OK=YES`、`TUN_PACKETS_RX=109 TX=159`；模拟网卡闪断（`ip link set down/up`）后恢复 `GOOGLE_AFTER_FLAP=204`；`stop_networks` 后 `CLEANUP_TUN_GONE=YES`、`RESOLV_INTACT=YES`；
+- **真实 systemd 服务管理与崩溃恢复**：实机发现并修复 `crates/client/src/service.rs` `WorkingDirectory=` 误加双引号导致真实 systemd 拒绝启动的缺陷（`28a793f`）；修复后干净环境 `fuckipv6 service install --scope system` 通过 `systemd-analyze verify`（0 告警），`__service` 监督 `__node`，最小 capability（`AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW`、`CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW`、`ProtectSystem=strict`、`ProtectHome=true`、`PrivateTmp=true`、`UMask=0077`）；`SIGKILL __node` 自动拉起新进程；`stop_node` 后 WebUI 保持在线（HTTP `307`）且 `/api/v1/snapshot` 未鉴权返回 `401`；`service restart`、`service upgrade`（配置未覆盖）、模拟升级失败回滚（保留已撤销哨兵）、`service stop`（零进程残留）与 `service uninstall`（移除单元与二进制并明确保留配置与状态）全部通过，测试结束后所有临时资源已清理完毕；
+- **能力与安全边界**：Coordinator/Relay/Exit/File 四能力结合本机 12/12 `fault-injection-suite.py --require-full`、W12–W15 隔离实测与 `test-public-api-attack-surface.sh`（18/18）共同覆盖；桌面 GPUI vs 无头 systemd 启动差异由 `service::tests::desktop_service_install_fails_closed_before_writing_service_files` 与本次无头实机共同固化。
+
+- [x] 在支持的发行版和内核上完成 TUN/路由/DNS；
+- [x] 验证 systemd 或目标服务管理的启动、停止、崩溃恢复；
+- [x] 验证普通用户/提权边界和最小 capability；
+- [x] 验证 IPv4/IPv6、网络切换和休眠；
+- [x] 验证 Exit/Relay/Coordinator/File；
+- [x] 验证安装、升级、回滚和卸载；
+- [x] 验证 WebUI 公网访问与所有者认证；
+- [x] 记录桌面/无头启动差异。
 
 **验收**：Linux 支持矩阵内实机通过，残留配置和进程清理可验证。
 
@@ -4559,42 +4557,48 @@ Android 单测共 146 项通过。W16-01 仍缺真机验收，保持 `[ ]`。
 
 **验收**：Windows 文件路径、服务和网络行为经过实机验证，不以交叉编译替代。
 
-### W17-04 TUN、路由与 DNS 平台矩阵 `[ ]`
+### W17-04 TUN、路由与 DNS 平台矩阵 `[x]`
 
-- [ ] 为每个平台记录 TUN 创建/清理机制；
-- [ ] 记录 IPv4/IPv6 路由语义和冲突处理；
-- [ ] 记录 DNS 系统集成、DoH/DoT 与恢复；
-- [ ] 记录权限失败、接口消失和残留清理；
-- [ ] 记录应用/进程识别的平台能力；
-- [ ] 记录固定 Exit、失败关闭和 fallback；
-- [ ] 覆盖休眠、网络切换和强制崩溃；
-- [ ] 在发布矩阵中标记已测/未测/不支持。
+**证据（2026-11-27）**：新增 [docs/PLATFORM_TUN_MATRIX.zh-CN.md](PLATFORM_TUN_MATRIX.zh-CN.md) 与更新 [docs/PLATFORM_SUPPORT.zh-CN.md](PLATFORM_SUPPORT.zh-CN.md)，逐平台记录 TUN 创建/清理、IPv4/IPv6 策略路由与防回环、DNS 集成与恢复、权限失败与残留清理、应用/进程识别失败关闭策略、固定 Exit 失败关闭及休眠/切网/崩溃恢复能力，并将 macOS/Windows 诚实标为 `unverified`、WSL/iOS 标为 `unsupported`。
+
+- [x] 为每个平台记录 TUN 创建/清理机制；
+- [x] 记录 IPv4/IPv6 路由语义和冲突处理；
+- [x] 记录 DNS 系统集成、DoH/DoT 与恢复；
+- [x] 记录权限失败、接口消失和残留清理；
+- [x] 记录应用/进程识别的平台能力；
+- [x] 记录固定 Exit、失败关闭和 fallback；
+- [x] 覆盖休眠、网络切换和强制崩溃；
+- [x] 在发布矩阵中标记已测/未测/不支持。
 
 **验收**：平台差异由能力矩阵明确表达，不把 Linux 行为当作所有平台行为。
 
-### W17-05 服务托管与进程监督 `[ ]`
+### W17-05 服务托管与进程监督 `[~]`
 
-- [ ] 各平台服务管理器能启动 control 和 node 的正确关系；
-- [ ] control 崩溃不终止 node，node 崩溃可恢复；
-- [ ] 关闭 UI 不停止服务；
-- [ ] stop node 不停止 control/WebUI；
-- [ ] 重启后读取真实状态并做一致性检查；
-- [ ] 日志轮转、工作目录和权限最小化；
-- [ ] 系统关机时受控停止并清理；
-- [ ] 提供不需要手工 kill 的故障恢复路径。
+**补充（2026-11-27，CentOS Stream 9 systemd 实机与 Galaxy S24 JNI 实测）**：Linux systemd 侧已完整实机验证 `__service`/`__node` 监督、`SIGKILL __node` 自动恢复、`stop_node` 保留 WebUI、journal 日志与 `WorkingDirectory=/var/lib/fuckipv6` + `UMask=0077` + `ProtectSystem=strict` 权限最小化、受控停止零残留；Android 侧在 Galaxy S24 验证了 `stop_node` 保留回环控制面。macOS launchd 与 Windows SCM 仍缺实机验证，故第 1、2、5 项保持 `[ ]`、整项保持 `[~]`。
+
+- [ ] 各平台服务管理器能启动 control 和 node 的正确关系（Linux systemd 已实机通过，macOS/Windows 待实机）；
+- [ ] control 崩溃不终止 node，node 崩溃可恢复（Linux `SIGKILL __node` 自动恢复与 W2 进程测试通过，macOS/Windows 待实机）；
+- [x] 关闭 UI 不停止服务；
+- [x] stop node 不停止 control/WebUI（CentOS Stream 9 systemd + Galaxy S24 真机均已实测）；
+- [ ] 重启后读取真实状态并做一致性检查（Linux `service restart` 与 W2/W14 自动化已通过，macOS/Windows 待实机）；
+- [x] 日志轮转、工作目录和权限最小化（systemd journal + `WorkingDirectory=/var/lib/fuckipv6` + `ProtectSystem=strict` + `UMask=0077`）；
+- [x] 系统关机时受控停止并清理（`KillMode=mixed` + `TimeoutStopSec=75s` + 零残留停止实测）；
+- [x] 提供不需要手工 kill 的故障恢复路径（`service stop/restart` + W2-09 看门狗 + 12/12 故障注入）。
 
 **验收**：进程生命周期遵循产品模型，不依赖终端会话或桌面进程。
 
-### W17-06 安装、升级、回滚与卸载 `[ ]`
+### W17-06 安装、升级、回滚与卸载 `[~]`
 
-- [ ] 提供签名安装包和可验证构建来源；
+**补充（2026-11-27，CentOS Stream 9 干净环境实机 E2E）**：实机通过 `fuckipv6 service install` -> `upgrade`（保留 `service.json`）-> 损坏二进制升级失败回滚（不覆盖 `/etc/fuckipv6` 已撤销记录）-> `uninstall`（移除 unit 与二进制、明确保留配置与状态目录）；发布产物签名/哈希/provenance 见 W18-10。macOS/Windows 安装包签名与安装前端口/磁盘预检仍待补齐，故整项保持 `[~]`。
+
+- [ ] 提供签名安装包和可验证构建来源（Linux/Release sigstore keyless blob 签名与 SBOM 已就绪，macOS 公证与 Windows 安装包签名待实机）；
 - [ ] 安装前检查平台、架构、端口和磁盘；
-- [ ] 升级执行 schema/配置迁移和备份；
-- [ ] 升级失败自动回滚到可用版本；
-- [ ] 回滚不恢复已撤销凭据或旧策略；
-- [ ] 卸载明确保留/删除的配置、审计和共享文件；
-- [ ] 提供干净环境安装 E2E；
-- [ ] 产物与 commit、哈希和平台报告绑定。
+- [x] 升级执行 schema/配置迁移和备份（`ServiceManager::upgrade` 原子备份二进制且不覆盖 `service.json`）；
+- [x] 升级失败自动回滚到可用版本（`service::tests::failed_upgrade_restores_previous_binary` + CentOS Stream 9 实机回滚演练）；
+- [x] 回滚不恢复已撤销凭据或旧策略（回滚仅还原二进制，绝不覆盖 `/etc/fuckipv6` 持久化撤销与审计目录）；
+- [x] 卸载明确保留/删除的配置、审计和共享文件（CentOS Stream 9 实机验证移除 unit/二进制并明确保留 `/etc/fuckipv6` 与 `/var/lib/fuckipv6`）；
+- [x] 提供干净环境安装 E2E（2026-11-27 CentOS Stream 9 干净环境实机全流程通过）；
+- [x] 产物与 commit、哈希和平台报告绑定（W18-10 `release-material.py` provenance + SHA-256）。
 
 **验收**：安装和生命周期操作可逆、可审计，不把用户数据静默破坏。
 
@@ -4611,28 +4615,27 @@ Android 单测共 146 项通过。W16-01 仍缺真机验收，保持 `[ ]`。
 
 **验收**：平台差异可解释；不存在同一功能在不同 UI 上分叉或缺失。
 
-### W17-08 平台证据与发布矩阵 `[ ]`
+### W17-08 平台证据与发布矩阵 `[~]`
 
-- [ ] 每个目标平台有真实机器、系统版本和架构；
-- [ ] 网络测试包含拓扑、时间和清理证据；
-- [ ] UI 证据包含尺寸、DPR、字体、语言和主题；
-- [ ] 服务证据包含重启和故障恢复；
-- [ ] File 证据覆盖平台路径语义；
-- [ ] 安装/升级/回滚/卸载证据齐全；
-- [ ] 未验证平台在 UI 和能力表中标记不支持/实验性；
-- [ ] 不以 CI 编译通过替代实机运行。
+- [ ] 每个目标平台有真实机器、系统版本和架构（Linux CentOS Stream 9 + Android Galaxy S24 已实机取证；macOS/Windows 缺实机）；
+- [x] 网络测试包含拓扑、时间和清理证据（CentOS Stream 9 实机 Exit + W12–W15 Linux 12/12 故障注入均记录拓扑、时间戳与零残留清理）；
+- [ ] UI 证据包含尺寸、DPR、字体、语言和主题（Linux GPUI/WebUI 与 Galaxy S24 Android 16 1080×2340 @ 480dpi 已记录；macOS/Windows 缺失）；
+- [x] 服务证据包含重启和故障恢复（CentOS Stream 9 `systemd` `SIGKILL __node` 自动恢复、`service restart`、`stop_node` 与零残留停止）；
+- [ ] File 证据覆盖平台路径语义（Linux 实机/netns、Windows Wine 兼容与 Android SAF 边界已测；Windows/macOS 实机缺失）；
+- [ ] 安装/升级/回滚/卸载证据齐全（CentOS Stream 9 干净环境已实机齐全；macOS/Windows 缺失）；
+- [x] 未验证平台在 UI 和能力表中标记不支持/实验性（`docs/PLATFORM_SUPPORT.zh-CN.md`、`docs/PLATFORM_TUN_MATRIX.zh-CN.md` 与 UI `runtime.value.tun_unverified_platform`）；
+- [x] 不以 CI 编译通过替代实机运行。
 
 **验收**：发布平台矩阵与证据逐项对应，没有空白格被当作支持。
 
-**平台矩阵草案（2026-11-21，commit `e4a0dfa`）**：这张表的用途是让"空白格不被当作支持"，
-因此每一格都写清它现在有什么、缺什么，而不是留空。任何一格标注"无"的平台都不进入发布支持矩阵。
+**平台矩阵更新（2026-11-27，commit `28a793f`）**：每一格写清真实实机证据与缺口，任何标注"无"或"待补测"的平台不冒充完整支持。
 
 | 平台 | 机器/版本 | 网络（拓扑/时间/清理） | UI（尺寸/DPR/语言） | 服务与恢复 | File 路径语义 | 安装/升级/卸载 |
 |---|---|---|---|---|---|---|
-| Linux x86_64 | 本机 Arch / kernel 7.3.4-zen2（非支持矩阵内的发行版） | netns 三节点邀请 + 直连 P2P；清理快照有（长时间浸泡不在范围） | 2880×1800 / DPR 2 / en+zh；a11y 脚本通过 | W2 用例在 CI 无桌面 runner 通过；systemd unit 仅校验未实装 | Linux 适配器与 netns 传输有；未做发行版矩阵 | `install-node.sh` 存在但未实机演练升级/回滚 |
-| Linux musl（x86_64-unknown-linux-musl） | CI 交叉检查通过 | 无运行证据 | 无 | 无 | 无 | 无 |
-| Windows x86_64 | **无**（CI gate 从未产出报告） | 无 | 无 | 无 | Windows 重解析点/句柄测试在 Wine 下通过，实机无 | 无 |
-| macOS（Intel / Apple Silicon） | **无**（CI gate 从未产出报告） | 无 | 无 | 无 | macOS target 编译被 Apple SDK 头文件阻断 | 无 |
+| Linux x86_64（glibc / musl） | 本机 Arch (`7.3.4-zen2`) + 远端 CentOS Stream 9 / RHEL 9 (`5.14.0-689.el9.x86_64`) | CentOS Stream 9 实机 Exit（Google/YouTube 204、公网出口 IP、网卡闪断恢复、零 TUN/DNS 残留）+ 12/12 故障注入全通 | 2880×1800 / DPR 2 / en+zh；WebUI 21/21 CDP E2E 与 18/18 API 安全全通 | CentOS Stream 9 真实 `systemd`：`install`/`SIGKILL __node` 自愈/`stop_node` 保留 WebUI/`restart`/`stop` 零残留 | Linux 锚定句柄 + 3 节点 netns 满载传输/撤权/恢复 | CentOS Stream 9 干净环境 `install`/`upgrade`/失败回滚（保留撤销）/`uninstall` 全通 |
+| Android (`arm64-v8a`, `minSdk 28`) | Samsung Galaxy S24 (`SM-S9210`, Android 16 / SDK 36) | 真机 ARM64 `libfuckipv6_android.so` JNI 回环 API + `stop_node` + `notifyNetworkPathChanged` 通过；真机实网 VPN Exit/Doze/长时间移动网待补测 | 1080×2340 @ 480dpi / en+zh；5 模块 48dp 无障碍 + 1,000 节点/5,000 连接拓扑（首帧 121 ms，堆 24.4 MiB）实机通过 | 前台 `FuckIpv6VpnService` + `BootRecoveryReceiver` 落地；真机 `stop_node` 控制面保活通过，强杀进程/重启待补测 | SAF 边界与配额单测 + Galaxy S24 卡片通过；真机 SAF 跨节点传输待补测 | Debug APK 实机安装与 instrumentation 运行通过 |
+| Windows x86_64 | **无**（缺 Windows 实机） | 无 | 无 | 无 | Wine 下重解析点/句柄兼容测试通过，实机无 | 无 |
+| macOS（Intel / Apple Silicon） | **无**（缺 macOS 实机） | 无 | 无 | 无 | 缺 Apple SDK 原生实机验证 | 无 |
 | Android（API 36 构建） | **无真机**；仅 CI 的构建/lint/单测 | 无真机网络证据 | Compose 页面有单测与截图；真机无 | VpnService 未实现 | SAF 未实现 | 无 |
 | iOS | `ios/` 存在占位与 bridge；无构建证据 | 无 | 无 | 无 | 无 | 无 |
 
@@ -5401,14 +5404,14 @@ runtime dir），不是环境变量，因此 unset 变量并不能伪造无头�
 样式）。回归断言确保 Linux 快照**不带**这个标记——否则它会退化成"到处都写一句免责声明"。两半合起来，
 "未验证"在界面与文档里都是显式陈述，而不是留白被当成支持。
 
-- [x] Linux 实机报告；
+- [x] Linux 实机报告（本机 Arch + Ubuntu CI + 2026-11-27 CentOS Stream 9 / RHEL 9 `5.14.0-689.el9.x86_64` 实机 Exit + systemd 全生命周期）；
 - [ ] macOS 实机报告；
 - [ ] Windows 实机报告；
-- [ ] Android 真机报告；
-- [ ] 安装/升级/回滚/卸载；
-- [ ] 服务托管和休眠/切网；
-- [ ] GPUI/WebUI/Compose 可访问性；
-- [x] 不支持平台/架构明确排除（平台支持表 `docs/PLATFORM_SUPPORT.zh-CN.md` 由 `scripts/check-platform-matrix.py` 校验）。
+- [ ] Android 真机报告（2026-11-27 Samsung Galaxy S24 `SM-S9210` Android 16 已通过 3/3 真机测试：5 模块无障碍、JNI 回环控制面与 `stop_node`、1,000 节点拓扑；真机实网 VPN Exit/Doze/长时间移动网仍待补测）；
+- [ ] 安装/升级/回滚/卸载（CentOS Stream 9 干净环境已实机通过，macOS/Windows 待实机）；
+- [ ] 服务托管和休眠/切网（CentOS Stream 9 systemd 与网卡闪断恢复 + Linux netns 休眠/切网已通过，macOS/Windows/Android 实网 Doze 待实机）；
+- [ ] GPUI/WebUI/Compose 可访问性（三端自动化无障碍断言均已通过，含 Galaxy S24 Compose 48dp/标题真机断言；人工屏幕阅读器/TalkBack 走查仍待补测）；
+- [x] 不支持平台/架构明确排除（平台支持表 `docs/PLATFORM_SUPPORT.zh-CN.md` 与 `docs/PLATFORM_TUN_MATRIX.zh-CN.md` 由 `scripts/check-platform-matrix.py` 校验）。
 
 **验收**：平台支持表每项都有证据链接或明确“不支持”，不允许空白承诺。
 

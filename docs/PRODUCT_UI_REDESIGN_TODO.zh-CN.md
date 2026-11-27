@@ -2477,7 +2477,18 @@ GPUI 的 routing 页面同样只消费 `snapshot.traffic_routing_page`，页面�
 
 当前生产 manifest 仍只有 `test_traffic_policy` 为 `implemented`，其余流量策略写操作保持 `unavailable`；生产运行时
 仍未设置 `traffic_routing_page`，也未提供真实逐流 observed hits，因此 WebUI/GPUI 目前只完成权威契约与页面投影闭环，
-生产后端和真实平台数据面仍未闭环，完整验收仍未满足。
+生产后端和真实平台数据面仍未闭环，完整验收仍未满足（历史状态，已于 2026-11-27 补齐生产后端，见下方补充）。
+
+**补充（2026-11-27，生产流量策略事务适配器、数据面求值与权威页面投影闭环）**：
+
+- 新增 `crates/client/src/traffic_policy_runtime.rs`，将 `TrafficPolicyTransactionStore`、`ProductionTrafficPolicyRuntimeAdapter`、`NetworkRuntimeManager` 与 `ClientRuntime` TUN 数据面完整打通：
+  - `NodeRuntimeHandler` 接通全部 6 个生产流量策略命令（`get_traffic_policy`、`preview_traffic_policy`、`preview_traffic_policy_rollback`、`apply_traffic_policy`、`rollback_traffic_policy`、`get_traffic_policy_history`），并在启动与刷新时自动执行 `recover_pending`、同步持久化策略与投影 `NodeSnapshot.traffic_routing_page`；
+  - `ClientRuntime` 响应 `ApplyTrafficPolicy` / `VerifyTrafficPolicy` / `TrafficPolicyObservation`，在 `route_tun_packet_with_policy` 中按真实 IPv4/IPv6 包头与 L4 协议/端口执行首条命中（目标 CIDR、端口范围、TCP/UDP/ICMP、Direct/Network/Exit/Reject 与 `decide_failure` 失败关闭），并将真实观测流记录入有界环形缓冲（64 样本上限）；无活动会话时诚实报告 `TrafficRoutingObservation::Unavailable`，活动会话零命中时报告 `Available { observed_flow_count: 0 }`；
+  - 诚实失败关闭边界：进程级应用身份匹配通过 `ApplicationIdentityCapability::unsupported` 拒绝（`Unsupported`），跨模式实时 DNS 域名到 IP 映射观察器未接入前域名匹配规则同样拒绝（`Unsupported`），高风险或直连回退规则未显式 `confirm_risk: true` 时拒绝（`InvalidRequest`），嵌入式模式拒绝宿主机流量策略写入并将 `can_edit` 置为 `false`；
+- `ui_manifest.rs` 与 `contracts/typescript/fixtures/node-manifest.json` 已将 6 个流量策略动作切换为 `implemented`；`docs/FEATURE_EVIDENCE.zh-CN.md` 更新为 **77/77 `implemented`（0 未实现）**；
+- 剩余未勾第 7 条保持 `[ ]`：Android 尚未实现流量路由规则编辑页面（归属 W16），且应用身份捕获与跨模式域名观察器仍待平台适配，因此 W11-08 维持 `[~]`。
+
+**验证通过（2026-11-27）**：`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、`cargo test --workspace`（客户端 1,560+ 项全过，含 `traffic_policy_runtime` 4 项、`traffic_policy_transaction` 16 项、`cli::commands` 67 项与全链路命令总线集成测试）、`x86_64-unknown-linux-musl` 与 `x86_64-pc-windows-gnu` 交叉检查、WebUI `typecheck`/`lint`/`vitest`（24 files, 349 passed）/`build`、`e2e-workflows`（21/21）、`./scripts/check-contracts.sh`、Android `:app:testDebugUnitTest :app:lintDebug` 与全部矩阵/文档校验脚本。
 
 **验证通过（2026-11-09）**：WebUI `npm test -- --run`（270 passed，其中流量路由工作流 12 passed）、
 `npm run typecheck`、`npm run lint`、`npm run build`、`cargo check -p fuckipv6-client --lib`、
@@ -4655,7 +4666,7 @@ W18-01 剩余两条（遍历全部控件、Coordinator/Relay/Exit/File 全能力
 **补充（2026-11-26，功能—证据映射表）**：第 8 条要求的映射表此前不存在。现在由 `scripts/feature-evidence-matrix.py`
 （+6 项自测）从 `contracts/typescript/fixtures/node-manifest.json`（随包发布的权威 manifest）生成
 `docs/FEATURE_EVIDENCE.zh-CN.md`：**77 个可见动作**，逐行给出页面、动作、命令、权限、审计策略、后端状态与证据文件；
-当前分布是 **implemented 71 / 未实现 6**（后者正是 W11 流量策略的六个入口）。校验规则是硬的：证据列必须是仓库内
+当前分布是 **implemented 71 / 未实现 6**（后者正是 W11 流量策略的六个入口；2026-11-27 commit `213287f` 已将全部 6 项接入生产后端与数据面，`docs/FEATURE_EVIDENCE.zh-CN.md` 现为 **implemented 77 / 未实现 0**）。校验规则是硬的：证据列必须是仓库内
 **真的提到该命令**的源文件（`command.rs` / `runtime_handler.rs` / `ui_manifest.rs`），缺失即失败；`--check` 模式要求
 磁盘上的表与 manifest 完全一致，因此 manifest 增删动作而忘记重新生成也会失败。已接入 release gate 的必选检查
 `feature-evidence` 与 `verify.yml`。本条据此勾选——剩下未勾的是"遍历全部控件"、"Coordinator/Relay/Exit/File 全能力"、
@@ -5498,7 +5509,7 @@ artifact 上传，找不到 APK 时直接失败。两端资产哈希因此都有
 | 签核项 | 结论 | 依据 |
 |---|---|---|
 | 所有 P0 工作包完成 | **否** | W12-07（完整文件下载与自动 DNS 清理）、W15 剩余两项、W16、W17 未完成；W18 自身已完成 4/11 |
-| 所有可见动作真实闭环 | 部分 | 6 个流量策略动作声明 `Unavailable` 且两端按 manifest 禁用（W18-01 第 3 条），其余动作为 `Implemented` |
+| 所有可见动作真实闭环 | **是**（2026-11-27 更新） | commit `213287f` 已接通最后 6 个流量策略生产动作与 TUN 数据面，77/77 可见动作全部 `Implemented`（`docs/FEATURE_EVIDENCE.zh-CN.md`），尚未支持的进程级应用身份与跨模式域名匹配诚实返回 `Unsupported` 失败关闭 |
 | 无伪按钮、假图表、静态成功 | 是（就 WebUI/GPUI 契约面） | 同 W18-01 第 3 条；活动/拓扑数据均来自权威快照投影 |
 | Exit 失败关闭和泄漏检查通过 | 部分 | W12-06 已复核 DNS/IPv4/IPv6，IPv6 外部目标仍 `not_tested` 且 `fail_closed_required=true` |
 | 临时 Coordinator 权限冻结通过 | 是 | W14-07 及其自动化证据 |
@@ -5508,7 +5519,7 @@ artifact 上传，找不到 APK 时直接失败。两端资产哈希因此都有
 | 所有未解决问题有公开影响说明 | 是 | 各未勾条目均在正文写明缺口；供应链十条 advisory 在 `deny.toml` 与 CHANGELOG 披露 |
 | 所有者/维护者完成最终签核 | **否** | 需要人签署，自动化只能提供上表 |
 
-结论：仍有三项为"否"、两项为"部分"（2026-11-26 更新后"无手工 kill 依赖"转为"是"，其余不变），**发布仍被阻断**。这张表就是 W18-11 的反面证据：它记录的是"现在还不能发"，
+结论：仍有三项为"否"、一项为"部分"（2026-11-26 "无手工 kill 依赖"转为"是"，2026-11-27 "所有可见动作真实闭环"转为"是"），**发布仍被阻断**。这张表就是 W18-11 的反面证据：它记录的是"现在还不能发"，
 而不是"已经发得出去"。
 
 **闸门本身是否有效（`aggregate` 的阻断规则）**：`release-gate.py aggregate` 只在以下全部成立时才输出

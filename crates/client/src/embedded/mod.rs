@@ -239,6 +239,99 @@ impl EmbeddedNodeRuntime {
         self.operations.lookup(id)
     }
 
+    /// Authoritative command bus shared by in-process mobile HTTP/control hosts.
+    pub fn commands(&self) -> crate::node::NodeCommandBus {
+        self.supervisor.commands()
+    }
+
+    /// Authoritative node state store shared by in-process mobile hosts.
+    pub fn state(&self) -> crate::node::NodeStateStore {
+        self.supervisor.state().clone()
+    }
+
+    /// Authoritative event bus shared by in-process mobile hosts.
+    pub fn event_bus(&self) -> crate::node::NodeEventBus {
+        self.supervisor.event_bus()
+    }
+
+    /// Active multi-network registry for in-process mobile diagnostics and File transport.
+    pub fn registry(&self) -> crate::ipc::MultiNetworkRegistry {
+        self.supervisor.registry().clone()
+    }
+
+    /// Persistent node storage directory configured for this embedded host.
+    pub fn storage_root(&self) -> &std::path::Path {
+        &self.context.storage_root
+    }
+
+    /// Lists a remote peer's shared directory through the embedded node's P2P File browser.
+    pub async fn list_file_directory(
+        &self,
+        request: crate::file_share::ListFileDirectoryRequest,
+    ) -> Result<crate::file_share::FileDirectoryListing, NodeProblem> {
+        self.ensure_running()?;
+        crate::ipc::list_file_directory(self.supervisor.registry(), Box::new(request))
+            .await
+            .map_err(|error| NodeProblem::new(NodeProblemCode::Unavailable, error.code()))
+    }
+
+    /// Starts an upload or download through the embedded node's P2P File requester.
+    pub async fn start_file_transfer(
+        &self,
+        request: crate::file_share::StartFileTransferRequest,
+    ) -> Result<crate::file_share::FileTransferHandle, NodeProblem> {
+        self.ensure_running()?;
+        crate::ipc::start_file_transfer(self.supervisor.registry(), Box::new(request))
+            .await
+            .map_err(|error| NodeProblem::new(NodeProblemCode::Unavailable, error.code()))
+    }
+
+    /// Lists active and recently completed File transfers in the embedded node.
+    pub async fn list_file_transfers(
+        &self,
+    ) -> Result<Vec<crate::file_share::FileTransferStatus>, NodeProblem> {
+        self.ensure_running()?;
+        crate::ipc::list_file_transfers(self.supervisor.registry())
+            .await
+            .map_err(|error| NodeProblem::new(NodeProblemCode::Unavailable, error.code()))
+    }
+
+    /// Pauses an active File transfer in the embedded node.
+    pub async fn pause_file_transfer(
+        &self,
+        transfer_id: String,
+        operation_id: String,
+    ) -> Result<(), NodeProblem> {
+        self.ensure_running()?;
+        crate::ipc::pause_file_transfer(self.supervisor.registry(), transfer_id, operation_id)
+            .await
+            .map_err(|error| NodeProblem::new(NodeProblemCode::Unavailable, error.code()))
+    }
+
+    /// Resumes a paused File transfer in the embedded node.
+    pub async fn resume_file_transfer(
+        &self,
+        transfer_id: String,
+        operation_id: String,
+    ) -> Result<(), NodeProblem> {
+        self.ensure_running()?;
+        crate::ipc::resume_file_transfer(self.supervisor.registry(), transfer_id, operation_id)
+            .await
+            .map_err(|error| NodeProblem::new(NodeProblemCode::Unavailable, error.code()))
+    }
+
+    /// Cancels an active or paused File transfer in the embedded node.
+    pub async fn cancel_file_transfer(
+        &self,
+        transfer_id: String,
+        operation_id: String,
+    ) -> Result<(), NodeProblem> {
+        self.ensure_running()?;
+        crate::ipc::cancel_file_transfer(self.supervisor.registry(), transfer_id, operation_id)
+            .await
+            .map_err(|error| NodeProblem::new(NodeProblemCode::Unavailable, error.code()))
+    }
+
     /// Reconnect existing transport sessions. Packet devices and host network
     /// leases stay owned by the running sessions. RebuildTun/RestartNetworks
     /// explicitly stop and reopen them through the platform factory instead.

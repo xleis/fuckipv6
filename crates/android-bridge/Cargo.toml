@@ -1,0 +1,36 @@
+[package]
+name = "fuckipv6-android-bridge"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "JNI and loopback HTTP control bridge hosting the embedded fuckipv6 node inside Android VpnService"
+
+[lib]
+name = "fuckipv6_android"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+fuckipv6-common = { version = "0.3.0", path = "../common" }
+fuckipv6-client = { version = "0.3.0", path = "../client", default-features = false }
+axum = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+getrandom = { workspace = true }
+ipnet = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+subtle = "2"
+tempfile = "3"
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni-sys = "0.4.1"
+
+[dev-dependencies]
+reqwest = { workspace = true }

@@ -60,7 +60,7 @@ use crate::p2p::quic;
 use crate::p2p::relay::QuicRelayClient;
 use crate::packet_io::PacketDevice;
 use crate::remote_node::RemoteNodeSession;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use crate::routing::exit_readiness::encode_exit_readiness_frame;
 use crate::routing::exit_readiness::{
     decode_exit_readiness_frame, is_exit_readiness_frame, ExitReadinessFrame,
@@ -80,10 +80,11 @@ use crate::routing::linux_route::LinuxRouteManager;
 #[cfg(target_os = "linux")]
 use crate::routing::linux_route_probe::ExitPathProbeReport;
 use crate::routing::recovery::RecoveryTrigger;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use crate::routing::recovery::{default_recovery_probes, PathRecoveryState, RecoveryProbeTarget};
 #[cfg(target_os = "linux")]
 use crate::routing::recovery::{
-    default_recovery_probes, PathRecoveryState, RecoveryCoordinator, RecoveryExpectations,
-    RecoveryProbeTarget, RecoveryReport, RecoveryRequest, RecoveryStatus,
+    RecoveryCoordinator, RecoveryExpectations, RecoveryReport, RecoveryRequest, RecoveryStatus,
 };
 #[cfg(target_os = "linux")]
 use crate::routing::table::{parse_linux_ip_routes, RouteEntry};
@@ -125,7 +126,7 @@ const RELAY_SELECTION_HEALTH_MAX_AGE_MS: u64 = 30_000;
 const RELAY_SELECTION_MAX_CONSECUTIVE_FAILURES: u32 = 3;
 const RELAY_SELECTION_SWITCH_COOLDOWN_MS: u64 = 5_000;
 const EXIT_CONNECTION_WATCHDOG_INTERVAL: Duration = Duration::from_millis(250);
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 const EXIT_READINESS_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(target_os = "linux")]
 const LOCAL_EXIT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -686,13 +687,13 @@ pub(crate) struct ClientRuntime {
     pub(crate) local_exit_runtime_problem: Option<NodeProblem>,
     pub(crate) recovery_events: RuntimeRecoveryEvents,
     recovery_trigger_tx: RuntimeRecoveryTriggerSender,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     exit_recovery_path: PathRecoveryState,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     relay_recovery_path: PathRecoveryState,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     exit_connection_watchdog: Option<ExitConnectionWatchdog>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     pending_exit_readiness: Option<PendingExitReadiness>,
     #[cfg(target_os = "linux")]
     exit_data_path_validation_in_progress: bool,
@@ -734,7 +735,7 @@ pub(crate) struct ClientRuntime {
     coordinator_takeover_wakeup: Option<mpsc::UnboundedSender<()>>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ExitConnectionWatchdog {
     target: NodeId,
@@ -743,7 +744,7 @@ struct ExitConnectionWatchdog {
     validation_queued: bool,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 #[derive(Debug, Clone)]
 struct PendingExitReadiness {
     target: NodeId,
@@ -752,7 +753,7 @@ struct PendingExitReadiness {
     deadline: Instant,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExitConnectionWatchdogAction {
     Wait,
@@ -760,7 +761,7 @@ enum ExitConnectionWatchdogAction {
     TimedOut,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 impl ExitConnectionWatchdog {
     fn new(
         target: NodeId,
@@ -937,10 +938,13 @@ impl ClientRuntime {
         reason_code: &'static str,
     ) {
         self.exit_selection_blocked = true;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             self.exit_connection_watchdog = None;
             self.pending_exit_readiness = None;
+        }
+        #[cfg(target_os = "linux")]
+        {
             self.exit_data_path_validation_in_progress = false;
         }
         self.exit_selection_gate.set_current_exit(None);
@@ -1047,7 +1051,7 @@ impl ClientRuntime {
         now_unix_ms: u64,
         validation_trigger: RecoveryTrigger,
     ) {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             if self
                 .exit_connection_watchdog
@@ -1064,7 +1068,7 @@ impl ClientRuntime {
             ));
             self.exit_recovery_path = PathRecoveryState::Disconnected;
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
         {
             let _ = target;
             if !self.recovery_trigger_tx.try_trigger(validation_trigger) {
@@ -1087,7 +1091,7 @@ impl ClientRuntime {
         now_unix_ms: u64,
         reason_code: &'static str,
     ) {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             self.pending_exit_readiness = None;
         }
@@ -1154,9 +1158,12 @@ impl ClientRuntime {
     }
 
     async fn begin_exit_recovery(&mut self, trigger: RecoveryTrigger, now_unix_ms: u64) {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             self.pending_exit_readiness = None;
+        }
+        #[cfg(target_os = "linux")]
+        {
             self.exit_data_path_validation_in_progress = false;
         }
         self.exit_selection_blocked = true;
@@ -1970,7 +1977,7 @@ pub(crate) async fn prepare_client_runtime_ext(
     );
 
     let tun_io = RuntimeTunIo::new(&config, &assigned_ips, tun, &stats, native_packet_device);
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     let relay_recovery_path = if outbound.relay_handle().await.is_some() {
         PathRecoveryState::Connected
     } else {
@@ -2015,13 +2022,13 @@ pub(crate) async fn prepare_client_runtime_ext(
         local_exit_runtime_problem: None,
         recovery_events,
         recovery_trigger_tx,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         exit_recovery_path: PathRecoveryState::Unknown,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         relay_recovery_path,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         exit_connection_watchdog: None,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         pending_exit_readiness: None,
         #[cfg(target_os = "linux")]
         exit_data_path_validation_in_progress: false,
@@ -2895,7 +2902,7 @@ fn exit_path_from_session_evidence(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 async fn drive_exit_connection_watchdog(runtime: &mut ClientRuntime) {
     let Some(watchdog_target) = runtime
         .exit_connection_watchdog
@@ -2986,9 +2993,155 @@ async fn drive_exit_connection_watchdog(runtime: &mut ClientRuntime) {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 async fn drive_exit_connection_watchdog(runtime: &mut ClientRuntime) {
     let _ = runtime;
+}
+
+#[cfg(target_os = "android")]
+async fn handle_android_recovery_trigger(runtime: &mut ClientRuntime, trigger: RecoveryTrigger) {
+    match trigger {
+        RecoveryTrigger::ExitDisconnected => {
+            runtime.reconcile_exit_selection(unix_time_ms()).await;
+            if runtime.traffic_session.state == TrafficProtectionState::FailClosed
+                || runtime.exit_selection_gate.pending_exit().is_some()
+            {
+                return;
+            }
+        }
+        RecoveryTrigger::ExitConnectionTimeout => {
+            runtime.exit_connection_watchdog = None;
+            runtime.exit_selection_gate.discard_pending_exit();
+        }
+        _ => {}
+    }
+
+    if runtime.route_engine.routing_mode() == fuckipv6_common::RoutingMode::MeshOnly {
+        runtime.exit_selection_blocked = false;
+        runtime.pending_exit_readiness = None;
+        runtime.exit_connection_watchdog = None;
+        return;
+    }
+
+    let expected_exit = runtime.intended_exit();
+    runtime.begin_exit_recovery(trigger, unix_time_ms()).await;
+
+    let Some(target) = expected_exit else {
+        runtime
+            .enter_fail_closed(
+                TrafficFailureKind::NetworkSelectionUnavailable,
+                unix_time_ms(),
+                "recovery.exit_readiness.target_missing",
+            )
+            .await;
+        return;
+    };
+    if runtime.intended_exit().as_ref() != Some(&target) {
+        runtime
+            .enter_fail_closed(
+                TrafficFailureKind::ExitUnavailable,
+                unix_time_ms(),
+                "recovery.exit_readiness.target_changed",
+            )
+            .await;
+        return;
+    }
+
+    let Some(exit_ip) = runtime.p2p.resolve_exit_peer_by_node_id(&target).await else {
+        runtime
+            .enter_fail_closed(
+                TrafficFailureKind::ExitUnavailable,
+                unix_time_ms(),
+                "recovery.exit_readiness.peer_missing",
+            )
+            .await;
+        return;
+    };
+    if !runtime
+        .p2p
+        .has_established_session_by_ip(IpAddr::V6(exit_ip))
+        .await
+    {
+        runtime
+            .enter_fail_closed(
+                TrafficFailureKind::ConnectionTimeout,
+                unix_time_ms(),
+                "recovery.exit_readiness.session_missing",
+            )
+            .await;
+        return;
+    }
+
+    let mut nonce = [0u8; 16];
+    if getrandom::fill(&mut nonce).is_err() {
+        runtime
+            .enter_fail_closed(
+                TrafficFailureKind::ConnectionTimeout,
+                unix_time_ms(),
+                "recovery.exit_readiness.nonce_failed",
+            )
+            .await;
+        return;
+    }
+    let targets = default_recovery_probes();
+    let frame = match ExitReadinessFrame::request(nonce, targets.clone()) {
+        Ok(frame) => frame,
+        Err(error) => {
+            tracing::error!(error = %error, "Android 无法构建 Exit readiness 请求");
+            runtime
+                .enter_fail_closed(
+                    TrafficFailureKind::ConnectionTimeout,
+                    unix_time_ms(),
+                    "recovery.exit_readiness.request_invalid",
+                )
+                .await;
+            return;
+        }
+    };
+    let payload = match encode_exit_readiness_frame(&frame) {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::error!(error = %error, "Android 无法编码 Exit readiness 请求");
+            runtime
+                .enter_fail_closed(
+                    TrafficFailureKind::ConnectionTimeout,
+                    unix_time_ms(),
+                    "recovery.exit_readiness.encode_failed",
+                )
+                .await;
+            return;
+        }
+    };
+    let deadline = Instant::now() + EXIT_READINESS_TIMEOUT;
+    runtime.pending_exit_readiness = Some(PendingExitReadiness {
+        target: target.clone(),
+        nonce,
+        targets,
+        deadline,
+    });
+    let outbound = OutboundPacket::owned(
+        IpAddr::V6(runtime.assigned_ip),
+        IpAddr::V6(exit_ip),
+        payload,
+    );
+    match runtime.outbound.submit(outbound) {
+        OutboundSubmitOutcome::Queued => {
+            tracing::info!(
+                exit = %target,
+                "Android 已向所选 Exit 发送认证 readiness 请求"
+            );
+        }
+        OutboundSubmitOutcome::QueueFull | OutboundSubmitOutcome::WorkerUnavailable => {
+            runtime.stats.record_p2p_send_error().await;
+            runtime
+                .enter_fail_closed(
+                    TrafficFailureKind::ConnectionTimeout,
+                    unix_time_ms(),
+                    "recovery.exit_readiness.send_failed",
+                )
+                .await;
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -3537,7 +3690,9 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                     Some(trigger) => {
                         #[cfg(target_os = "linux")]
                         handle_linux_recovery_trigger(runtime, trigger).await;
-                        #[cfg(not(target_os = "linux"))]
+                        #[cfg(target_os = "android")]
+                        handle_android_recovery_trigger(runtime, trigger).await;
+                        #[cfg(not(any(target_os = "linux", target_os = "android")))]
                         tracing::warn!(
                             trigger = ?trigger,
                             diagnostic_id = "recovery.platform_unavailable",
@@ -4277,7 +4432,14 @@ fn pending_exit_readiness_deadline(runtime: &ClientRuntime) -> Option<Instant> {
             .as_ref()
             .map(|pending| pending.deadline)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "android")]
+    {
+        runtime
+            .pending_exit_readiness
+            .as_ref()
+            .map(|pending| pending.deadline)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
         let _ = runtime;
         None
@@ -4302,7 +4464,7 @@ async fn wait_for_file_retry(deadline_unix_ms: Option<u64>) {
 }
 
 async fn complete_pending_exit_readiness_timeout(runtime: &mut ClientRuntime) {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         if runtime.pending_exit_readiness.is_some() {
             runtime.pending_exit_readiness = None;
@@ -4315,7 +4477,7 @@ async fn complete_pending_exit_readiness_timeout(runtime: &mut ClientRuntime) {
                 .await;
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
         let _ = runtime;
     }
@@ -5822,7 +5984,120 @@ fn exit_readiness_request_authorized(
     true
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "android")]
+async fn handle_exit_readiness_frame(
+    runtime: &mut ClientRuntime,
+    _src_ip: IpAddr,
+    peer: PeerRouteInfo,
+    frame: ExitReadinessFrame,
+) {
+    let ExitReadinessFrame::Response { nonce, results } = frame else {
+        tracing::debug!(
+            peer = %peer.node_id,
+            "Android 端不作为内核 Exit 转发端，拒绝 readiness 探测请求"
+        );
+        return;
+    };
+    let Some(pending) = runtime.pending_exit_readiness.clone() else {
+        tracing::debug!(
+            peer = %peer.node_id,
+            nonce = ?nonce,
+            "Android 当前没有待匹配的 Exit readiness 请求，丢弃响应"
+        );
+        return;
+    };
+    if peer.node_id != pending.target {
+        runtime
+            .enter_fail_closed(
+                TrafficFailureKind::ExitUnavailable,
+                unix_time_ms(),
+                "recovery.exit_readiness.peer_mismatch",
+            )
+            .await;
+        return;
+    }
+    let response = ExitReadinessFrame::Response { nonce, results };
+    if response
+        .validate_response(pending.nonce, &pending.targets)
+        .is_err()
+        || !response.all_probes_passed()
+    {
+        runtime
+            .enter_fail_closed(
+                TrafficFailureKind::ExitUnavailable,
+                unix_time_ms(),
+                "recovery.exit_readiness.failed",
+            )
+            .await;
+        return;
+    }
+    if runtime.intended_exit().as_ref() != Some(&pending.target) {
+        runtime
+            .enter_fail_closed(
+                TrafficFailureKind::ExitUnavailable,
+                unix_time_ms(),
+                "recovery.exit_readiness.target_changed",
+            )
+            .await;
+        return;
+    }
+    if let Some(staged) = runtime.exit_selection_gate.pending_exit().cloned() {
+        let committed = runtime.exit_selection_gate.commit_pending_exit();
+        if committed.as_ref() != Some(&staged) || staged != pending.target {
+            runtime
+                .enter_fail_closed(
+                    TrafficFailureKind::ExitUnavailable,
+                    unix_time_ms(),
+                    "recovery.exit_migration.target_mismatch",
+                )
+                .await;
+            return;
+        }
+    } else if runtime.exit_selection_gate.current_exit() != Some(&pending.target) {
+        runtime
+            .enter_fail_closed(
+                TrafficFailureKind::ExitUnavailable,
+                unix_time_ms(),
+                "recovery.exit_target_changed_during_validation",
+            )
+            .await;
+        return;
+    }
+
+    let now_unix_ms = unix_time_ms().max(1);
+    let validation = fuckipv6_common::domain::TrafficSessionValidation::passed(
+        true,
+        true,
+        true,
+        true,
+        now_unix_ms,
+    );
+    if let Err(error) = runtime
+        .traffic_session
+        .mark_protected(validation, now_unix_ms)
+    {
+        tracing::error!(error = %error, "Android Exit readiness 证据无法建立受保护流量会话");
+        runtime
+            .enter_fail_closed(
+                TrafficFailureKind::ConnectionTimeout,
+                unix_time_ms(),
+                "recovery.validation_application_failed",
+            )
+            .await;
+        return;
+    }
+    runtime.pending_exit_readiness = None;
+    runtime.exit_selection_blocked = false;
+    runtime.exit_connection_watchdog = None;
+    runtime.exit_recovery_path = PathRecoveryState::Connected;
+    runtime.publish_traffic_session().await;
+    tracing::info!(
+        exit = %pending.target,
+        "Android Exit readiness 通过，流量会话已进入受保护状态"
+    );
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 async fn handle_exit_readiness_frame(
     _runtime: &mut ClientRuntime,
     _src_ip: IpAddr,

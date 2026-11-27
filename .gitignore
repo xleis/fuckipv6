@@ -49,11 +49,12 @@ __pycache__/
 /fuzz/coverage/
 /fuzz/corpus/
 
-# Android/Gradle local state
+# Android/Gradle local state and generated Rust JNI libraries
 /android/.gradle/
 /android/.kotlin/
 /android/local.properties
 /android/**/build/
+/android/app/src/main/jniLibs/
 
 # Xcode local state
 /ios/DerivedData/

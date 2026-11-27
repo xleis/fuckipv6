@@ -1552,9 +1552,13 @@ fn scan_directory_unix(
 
 #[cfg(unix)]
 fn clear_errno() {
-    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[cfg(target_os = "linux")]
     unsafe {
         *libc::__errno_location() = 0;
+    }
+    #[cfg(target_os = "android")]
+    unsafe {
+        *libc::__errno() = 0;
     }
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     unsafe {
@@ -1564,8 +1568,10 @@ fn clear_errno() {
 
 #[cfg(unix)]
 fn take_errno_error() -> Option<io::Error> {
-    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[cfg(target_os = "linux")]
     let code = unsafe { *libc::__errno_location() };
+    #[cfg(target_os = "android")]
+    let code = unsafe { *libc::__errno() };
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     let code = unsafe { *libc::__error() };
     (code != 0).then(|| io::Error::from_raw_os_error(code))

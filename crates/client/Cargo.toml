@@ -114,8 +114,8 @@ windows-sys = { version = "0.59", features = [
     "Win32_Networking_WinSock",
 ] }
 
-# macOS utun support and iOS POSIX helpers (file sandbox flags, signal-free
-# process checks). iOS has no utun module of its own; the TUN abstraction reports
-# an explicit unsupported error there.
-[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+# macOS utun support and mobile (iOS / Android) POSIX helpers (file sandbox flags,
+# signal-free process checks). Mobile hosts have no utun module of their own;
+# the TUN abstraction reports an explicit unsupported error there.
+[target.'cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))'.dependencies]
 libc = { workspace = true }

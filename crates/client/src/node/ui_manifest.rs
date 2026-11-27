@@ -2477,7 +2477,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         "get_traffic_policy",
                         "action.get_traffic_policy",
                         NodeCommandKind::GetTrafficPolicy,
-                        NodeUiBackendStatus::Unavailable,
+                        NodeUiBackendStatus::Implemented,
                         NodePermission::ViewState,
                         NodeUiAvailability::Always,
                         vec![],
@@ -2487,7 +2487,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         "preview_traffic_policy",
                         "action.preview_traffic_policy",
                         NodeCommandKind::PreviewTrafficPolicy,
-                        NodeUiBackendStatus::Unavailable,
+                        NodeUiBackendStatus::Implemented,
                         NodePermission::ChangeRouting,
                         NodeUiAvailability::Always,
                         vec![
@@ -2512,7 +2512,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         "preview_traffic_policy_rollback",
                         "action.preview_traffic_policy_rollback",
                         NodeCommandKind::PreviewTrafficPolicyRollback,
-                        NodeUiBackendStatus::Unavailable,
+                        NodeUiBackendStatus::Implemented,
                         NodePermission::ChangeRouting,
                         NodeUiAvailability::Always,
                         vec![
@@ -2537,7 +2537,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         "apply_traffic_policy",
                         "action.apply_traffic_policy",
                         NodeCommandKind::ApplyTrafficPolicy,
-                        NodeUiBackendStatus::Unavailable,
+                        NodeUiBackendStatus::Implemented,
                         NodePermission::ChangeRouting,
                         NodeUiAvailability::Always,
                         vec![
@@ -2574,7 +2574,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         "rollback_traffic_policy",
                         "action.rollback_traffic_policy",
                         NodeCommandKind::RollbackTrafficPolicy,
-                        NodeUiBackendStatus::Unavailable,
+                        NodeUiBackendStatus::Implemented,
                         NodePermission::ChangeRouting,
                         NodeUiAvailability::Always,
                         vec![
@@ -2611,7 +2611,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         "get_traffic_policy_history",
                         "action.get_traffic_policy_history",
                         NodeCommandKind::GetTrafficPolicyHistory,
-                        NodeUiBackendStatus::Unavailable,
+                        NodeUiBackendStatus::Implemented,
                         NodePermission::ViewState,
                         NodeUiAvailability::Always,
                         vec![],

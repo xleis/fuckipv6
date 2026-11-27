@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -11,7 +12,7 @@ use fuckipv6_common::domain::{
     MemberLifecycleChangeRequest, MemberRemovalPreviewRequest, MembershipRole, MembershipTerms,
     NetworkDiscoveryRecord, NetworkId, NetworkJoinPreview, NetworkMembership,
     NetworkProfileWarning, NetworkProfileWarningCode, NetworkRecord, NodeId, OperationId,
-    JOIN_REQUEST_DEFAULT_EXPIRY_MS,
+    TrafficRoutingWorkflowState, JOIN_REQUEST_DEFAULT_EXPIRY_MS,
 };
 use fuckipv6_common::{Identity, JoinRequestBatchReviewItem, NetworkTicket};
 
@@ -43,6 +44,14 @@ use crate::node::command::{
 };
 use crate::policy_transaction::{PolicySnapshot, PolicyTransactionError, PolicyTransactionStore};
 use crate::symmetric::EmbeddedServiceManager;
+use crate::traffic_policy_runtime::{
+    build_traffic_routing_page_model, fallback_traffic_policy, validate_supported_runtime_matchers,
+    validation_context_from_snapshot, ProductionTrafficPolicyRuntimeAdapter,
+    OBSERVATION_UNAVAILABLE_REASON,
+};
+use crate::traffic_policy_transaction::{
+    TrafficPolicyAuthorization, TrafficPolicyTransactionError, TrafficPolicyTransactionStore,
+};
 
 #[derive(Clone)]
 struct NodeCommandAuditContext {
@@ -63,9 +72,12 @@ pub struct NodeRuntimeHandler {
     runtime: Option<NetworkRuntimeManager>,
     configs: Option<ConfigManager>,
     policy_store: Option<PolicyTransactionStore>,
+    traffic_policy_store: Option<TrafficPolicyTransactionStore>,
     discovery: Option<DiscoveryIndexManager>,
     join_gate: Arc<Mutex<()>>,
     policy_gate: Arc<Mutex<()>>,
+    traffic_policy_gate: Arc<Mutex<()>>,
+    traffic_policy_recovered: Arc<AtomicBool>,
     embedded: bool,
 }
 
@@ -86,9 +98,12 @@ impl NodeRuntimeHandler {
             runtime: None,
             configs: None,
             policy_store: None,
+            traffic_policy_store: None,
             discovery: None,
             join_gate: Arc::new(Mutex::new(())),
             policy_gate: Arc::new(Mutex::new(())),
+            traffic_policy_gate: Arc::new(Mutex::new(())),
+            traffic_policy_recovered: Arc::new(AtomicBool::new(false)),
             embedded: false,
         }
     }
@@ -102,6 +117,8 @@ impl NodeRuntimeHandler {
     ) -> Self {
         let discovery = DiscoveryIndexManager::production(&configs);
         let policy_store = PolicyTransactionStore::new(configs.config_dir().to_path_buf());
+        let traffic_policy_store =
+            TrafficPolicyTransactionStore::new(configs.config_dir().to_path_buf());
         Self {
             state,
             registry,
@@ -109,9 +126,12 @@ impl NodeRuntimeHandler {
             runtime: Some(runtime),
             configs: Some(configs),
             policy_store: Some(policy_store),
+            traffic_policy_store: Some(traffic_policy_store),
             discovery: Some(discovery),
             join_gate: Arc::new(Mutex::new(())),
             policy_gate: Arc::new(Mutex::new(())),
+            traffic_policy_gate: Arc::new(Mutex::new(())),
+            traffic_policy_recovered: Arc::new(AtomicBool::new(false)),
             embedded: false,
         }
     }
@@ -128,9 +148,12 @@ impl NodeRuntimeHandler {
         let runtime = self.runtime.clone();
         let configs = self.configs.clone();
         let policy_store = self.policy_store.clone();
+        let traffic_policy_store = self.traffic_policy_store.clone();
         let discovery = self.discovery.clone();
         let join_gate = self.join_gate.clone();
         let policy_gate = self.policy_gate.clone();
+        let traffic_policy_gate = self.traffic_policy_gate.clone();
+        let traffic_policy_recovered = self.traffic_policy_recovered.clone();
         let embedded = self.embedded;
 
         Box::pin(async move {
@@ -198,9 +221,30 @@ impl NodeRuntimeHandler {
                     if let Some(problem) = runtime_problem {
                         capture.problems.push(problem);
                     }
-                    let snapshot = state
+                    let mut snapshot = state
                         .refresh_interface_capture(capture, live_tun_names.as_ref())
                         .await;
+                    if let (Some(traffic_store), Some(runtime)) =
+                        (traffic_policy_store.as_ref(), runtime.as_ref())
+                    {
+                        let _guard = traffic_policy_gate.lock().await;
+                        if let Err(error) = refresh_traffic_policy_state(
+                            &state,
+                            traffic_store,
+                            runtime,
+                            &traffic_policy_recovered,
+                            embedded,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                %error,
+                                "刷新流量策略权威视图失败，保留上一份快照"
+                            );
+                        } else {
+                            snapshot = state.snapshot().await;
+                        }
+                    }
                     NodeCommandResult::snapshot(request_id, snapshot)
                 }
                 super::NodeCommand::GetUiManifest => {
@@ -322,30 +366,138 @@ impl NodeRuntimeHandler {
                     Some(policy_store) => policy_history(&state, &policy_store, request_id).await,
                     None => unavailable(request_id, "读取策略历史需要节点配置管理器"),
                 },
-                super::NodeCommand::GetTrafficPolicy => unavailable(
-                    request_id,
-                    "读取流量策略需要已接入的生产 TUN/路由/DNS 事务适配器",
-                ),
-                super::NodeCommand::PreviewTrafficPolicy(_) => unavailable(
-                    request_id,
-                    "流量策略预览需要已接入的生产 TUN/路由/DNS 事务适配器",
-                ),
-                super::NodeCommand::PreviewTrafficPolicyRollback(_) => unavailable(
-                    request_id,
-                    "流量策略回滚预览需要已接入的生产 TUN/路由/DNS 事务适配器",
-                ),
-                super::NodeCommand::ApplyTrafficPolicy(_) => unavailable(
-                    request_id,
-                    "流量策略应用需要已接入的生产 TUN/路由/DNS 事务适配器",
-                ),
-                super::NodeCommand::RollbackTrafficPolicy(_) => unavailable(
-                    request_id,
-                    "流量策略回滚需要已接入的生产 TUN/路由/DNS 事务适配器",
-                ),
-                super::NodeCommand::GetTrafficPolicyHistory => unavailable(
-                    request_id,
-                    "读取流量策略历史需要已接入的生产 TUN/路由/DNS 事务适配器",
-                ),
+                super::NodeCommand::GetTrafficPolicy => match (traffic_policy_store, runtime) {
+                    (Some(store), Some(runtime)) => {
+                        get_traffic_policy(
+                            &state,
+                            &store,
+                            &runtime,
+                            &traffic_policy_gate,
+                            &traffic_policy_recovered,
+                            embedded,
+                            request_id,
+                        )
+                        .await
+                    }
+                    _ => unavailable(
+                        request_id,
+                        "读取流量策略需要已接入的生产节点运行时与配置管理器",
+                    ),
+                },
+                super::NodeCommand::PreviewTrafficPolicy(command) => {
+                    match (traffic_policy_store, runtime) {
+                        (Some(store), Some(runtime)) => {
+                            preview_traffic_policy(
+                                &state,
+                                &store,
+                                &runtime,
+                                &traffic_policy_gate,
+                                &traffic_policy_recovered,
+                                embedded,
+                                request_id,
+                                command,
+                            )
+                            .await
+                        }
+                        _ => unavailable(
+                            request_id,
+                            "流量策略预览需要已接入的生产节点运行时与配置管理器",
+                        ),
+                    }
+                }
+                super::NodeCommand::PreviewTrafficPolicyRollback(command) => {
+                    match (traffic_policy_store, runtime) {
+                        (Some(store), Some(runtime)) => {
+                            preview_traffic_policy_rollback(
+                                &state,
+                                &store,
+                                &runtime,
+                                &traffic_policy_gate,
+                                &traffic_policy_recovered,
+                                embedded,
+                                request_id,
+                                command,
+                            )
+                            .await
+                        }
+                        _ => unavailable(
+                            request_id,
+                            "流量策略回滚预览需要已接入的生产节点运行时与配置管理器",
+                        ),
+                    }
+                }
+                super::NodeCommand::ApplyTrafficPolicy(command) => {
+                    match (traffic_policy_store, runtime, context) {
+                        (Some(store), Some(runtime), Some(context)) => {
+                            apply_traffic_policy(
+                                &state,
+                                &store,
+                                &runtime,
+                                &traffic_policy_gate,
+                                &traffic_policy_recovered,
+                                embedded,
+                                request_id,
+                                command,
+                                context.actor,
+                                context.source,
+                            )
+                            .await
+                        }
+                        (None, _, _) | (_, None, _) => unavailable(
+                            request_id,
+                            "流量策略应用需要已接入的生产节点运行时与配置管理器",
+                        ),
+                        (_, _, None) => {
+                            unavailable(request_id, "流量策略应用缺少受信任的认证上下文")
+                        }
+                    }
+                }
+                super::NodeCommand::RollbackTrafficPolicy(command) => {
+                    match (traffic_policy_store, runtime, context) {
+                        (Some(store), Some(runtime), Some(context)) => {
+                            rollback_traffic_policy(
+                                &state,
+                                &store,
+                                &runtime,
+                                &traffic_policy_gate,
+                                &traffic_policy_recovered,
+                                embedded,
+                                request_id,
+                                command,
+                                context.actor,
+                                context.source,
+                            )
+                            .await
+                        }
+                        (None, _, _) | (_, None, _) => unavailable(
+                            request_id,
+                            "流量策略回滚需要已接入的生产节点运行时与配置管理器",
+                        ),
+                        (_, _, None) => {
+                            unavailable(request_id, "流量策略回滚缺少受信任的认证上下文")
+                        }
+                    }
+                }
+                super::NodeCommand::GetTrafficPolicyHistory => {
+                    match (traffic_policy_store, runtime) {
+                        (Some(store), Some(runtime)) => {
+                            traffic_policy_history(
+                                &state,
+                                &store,
+                                &runtime,
+                                &traffic_policy_gate,
+                                &traffic_policy_recovered,
+                                embedded,
+                                request_id,
+                            )
+                            .await
+                        }
+                        _ => unavailable(
+                            request_id,
+                            "读取流量策略历史需要已接入的生产节点运行时与配置管理器",
+                        ),
+                    }
+                }
                 super::NodeCommand::TestTrafficPolicy(command) => match command.compare() {
                     Ok(comparison) => NodeCommandResult::completed(
                         request_id,
@@ -2044,6 +2196,667 @@ async fn policy_history(
         Err(error) => policy_transaction_rejection(
             request_id,
             PolicyTransactionError::Persistence(format!("读取策略历史任务异常终止: {error}")),
+        ),
+    }
+}
+
+async fn ensure_traffic_policy_recovered(
+    state: &NodeStateStore,
+    store: &TrafficPolicyTransactionStore,
+    runtime: &NetworkRuntimeManager,
+    recovered: &AtomicBool,
+    embedded: bool,
+) -> std::result::Result<
+    Option<crate::traffic_policy_transaction::TrafficPolicyCurrent>,
+    TrafficPolicyTransactionError,
+> {
+    let snapshot = state.snapshot().await;
+    if snapshot.identity.is_none() {
+        return Ok(None);
+    }
+    let fallback = fallback_traffic_policy(&snapshot)?;
+    if !recovered.load(Ordering::Acquire) {
+        let store_clone = store.clone();
+        let fallback_clone = fallback.clone();
+        let adapter = ProductionTrafficPolicyRuntimeAdapter::new(
+            runtime.clone(),
+            tokio::runtime::Handle::current(),
+        );
+        let recovery = tokio::task::spawn_blocking(move || {
+            store_clone.recover_pending(&fallback_clone, &adapter)
+        })
+        .await
+        .map_err(|error| TrafficPolicyTransactionError::Persistence(error.to_string()))??;
+        if let Some(tx_id) = recovery.transaction_id.as_deref() {
+            tracing::warn!(
+                transaction_id = tx_id,
+                rolled_back_to = ?recovery.rolled_back_to_revision,
+                "已恢复未完成的流量策略事务"
+            );
+        }
+        let store_clone = store.clone();
+        let fallback_clone = fallback.clone();
+        let current = tokio::task::spawn_blocking(move || store_clone.current(&fallback_clone))
+            .await
+            .map_err(|error| TrafficPolicyTransactionError::Persistence(error.to_string()))??;
+        if current.revision > 1 && !embedded {
+            if let Err(error) = runtime.apply_traffic_policy(current.policy.clone()).await {
+                tracing::warn!(
+                    revision = current.revision,
+                    %error,
+                    "启动时同步持久化流量策略到运行时失败"
+                );
+            }
+        }
+        recovered.store(true, Ordering::Release);
+        return Ok(Some(current));
+    }
+
+    let store_clone = store.clone();
+    let current = tokio::task::spawn_blocking(move || store_clone.current(&fallback))
+        .await
+        .map_err(|error| TrafficPolicyTransactionError::Persistence(error.to_string()))??;
+    Ok(Some(current))
+}
+
+async fn publish_traffic_routing_page(
+    state: &NodeStateStore,
+    runtime: &NetworkRuntimeManager,
+    policy: &fuckipv6_common::domain::TrafficPolicy,
+    workflow: TrafficRoutingWorkflowState,
+    embedded: bool,
+) {
+    let observation = if embedded {
+        fuckipv6_common::domain::TrafficRoutingObservation::unavailable(
+            OBSERVATION_UNAVAILABLE_REASON,
+        )
+    } else {
+        runtime.traffic_policy_observation().await
+    };
+    let snapshot = state.snapshot().await;
+    match build_traffic_routing_page_model(&snapshot, policy, workflow, observation, embedded) {
+        Ok(page) => {
+            if snapshot.traffic_routing_page.as_ref() == Some(&page) {
+                return;
+            }
+            state
+                .update(|current| {
+                    current.traffic_routing_page = Some(page);
+                })
+                .await;
+        }
+        Err(error) => {
+            tracing::warn!(%error, "构建权威流量路由页面投影失败，保留上一份视图");
+        }
+    }
+}
+
+async fn refresh_traffic_policy_state(
+    state: &NodeStateStore,
+    store: &TrafficPolicyTransactionStore,
+    runtime: &NetworkRuntimeManager,
+    recovered: &AtomicBool,
+    embedded: bool,
+) -> std::result::Result<(), TrafficPolicyTransactionError> {
+    let Some(current) =
+        ensure_traffic_policy_recovered(state, store, runtime, recovered, embedded).await?
+    else {
+        return Ok(());
+    };
+    publish_traffic_routing_page(
+        state,
+        runtime,
+        &current.policy,
+        TrafficRoutingWorkflowState::Applied {
+            revision: current.revision,
+        },
+        embedded,
+    )
+    .await;
+    Ok(())
+}
+
+fn traffic_policy_transaction_rejection(
+    request_id: u64,
+    error: TrafficPolicyTransactionError,
+) -> NodeCommandResult {
+    let problem = match error {
+        TrafficPolicyTransactionError::RevisionConflict { expected, current } => {
+            NodeProblem::new(NodeProblemCode::Conflict, "流量策略已被其他操作修改")
+                .with_message_key("traffic_policy.error.revision_conflict")
+                .with_param("expected_revision", expected.to_string())
+                .with_param("current_revision", current.to_string())
+                .with_revision_conflict(expected, current)
+        }
+        TrafficPolicyTransactionError::InvalidCandidate(message) => {
+            NodeProblem::new(NodeProblemCode::InvalidRequest, "流量策略候选校验失败")
+                .with_message_key("traffic_policy.error.invalid_candidate")
+                .with_validation_issues(vec![NodeValidationIssue {
+                    path: "draft".into(),
+                    code: "invalid_candidate".into(),
+                    message,
+                }])
+        }
+        TrafficPolicyTransactionError::PermissionDenied {
+            reason_code,
+            message,
+        } => NodeProblem::new(NodeProblemCode::PermissionDenied, message)
+            .with_message_key("error.permission_denied")
+            .with_param("reason_code", reason_code),
+        TrafficPolicyTransactionError::InvalidAuthorization(message) => {
+            NodeProblem::new(NodeProblemCode::InvalidRequest, message)
+                .with_message_key("error.invalid_request")
+        }
+        TrafficPolicyTransactionError::MissingTarget { kind, id } => NodeProblem::new(
+            NodeProblemCode::NotFound,
+            format!("流量策略目标不存在: {kind} [{id}]"),
+        )
+        .with_message_key("traffic_policy.error.missing_target")
+        .with_param("target_kind", kind)
+        .with_param("target_id", id),
+        TrafficPolicyTransactionError::CapabilityUnavailable(message) => {
+            NodeProblem::new(NodeProblemCode::Unsupported, message)
+                .with_message_key("error.capability_unavailable")
+        }
+        TrafficPolicyTransactionError::RevisionNotFound(revision) => {
+            NodeProblem::new(NodeProblemCode::NotFound, "目标流量策略 revision 不存在")
+                .with_message_key("traffic_policy.error.target_revision_not_found")
+                .with_param("target_revision", revision.to_string())
+        }
+        TrafficPolicyTransactionError::RecoveryRequired(transaction_id) => NodeProblem::new(
+            NodeProblemCode::Conflict,
+            "存在未完成的流量策略事务，需要先完成恢复后才能继续操作",
+        )
+        .with_message_key("traffic_policy.error.recovery_required")
+        .with_param("transaction_id", transaction_id),
+        TrafficPolicyTransactionError::RuntimeFailed {
+            stage,
+            reason_code,
+            message,
+        } => NodeProblem::new(NodeProblemCode::Unavailable, message)
+            .with_message_key("traffic_policy.error.runtime_failed")
+            .with_param("stage", stage)
+            .with_param("reason_code", reason_code)
+            .retryable(true),
+        TrafficPolicyTransactionError::CompensationFailed(details) => {
+            tracing::error!(%details, "流量策略运行时补偿失败，保留待恢复日志");
+            NodeProblem::new(
+                NodeProblemCode::Internal,
+                "流量策略运行时应用与自动补偿均失败，请检查节点诊断后重试恢复",
+            )
+            .with_message_key("traffic_policy.error.compensation_failed")
+            .with_param("original_stage", details.original_stage)
+            .with_param("rollback_stage", details.rollback_stage)
+        }
+        TrafficPolicyTransactionError::Persistence(details) => {
+            tracing::error!(%details, "流量策略持久化失败，旧策略保持有效");
+            NodeProblem::new(
+                NodeProblemCode::Internal,
+                "流量策略持久化失败，旧 revision 保持不变",
+            )
+            .with_message_key("traffic_policy.error.persistence_failed")
+        }
+    };
+    NodeCommandResult::rejected(request_id, problem)
+}
+
+async fn get_traffic_policy(
+    state: &NodeStateStore,
+    store: &TrafficPolicyTransactionStore,
+    runtime: &NetworkRuntimeManager,
+    gate: &Mutex<()>,
+    recovered: &AtomicBool,
+    embedded: bool,
+    request_id: u64,
+) -> NodeCommandResult {
+    let _guard = gate.lock().await;
+    match ensure_traffic_policy_recovered(state, store, runtime, recovered, embedded).await {
+        Ok(Some(current)) => {
+            publish_traffic_routing_page(
+                state,
+                runtime,
+                &current.policy,
+                TrafficRoutingWorkflowState::Applied {
+                    revision: current.revision,
+                },
+                embedded,
+            )
+            .await;
+            NodeCommandResult::completed(request_id, NodeCommandOutcome::TrafficPolicy(current))
+        }
+        Ok(None) => traffic_policy_transaction_rejection(
+            request_id,
+            TrafficPolicyTransactionError::CapabilityUnavailable(
+                "节点身份尚未初始化，无法读取流量策略".into(),
+            ),
+        ),
+        Err(error) => traffic_policy_transaction_rejection(request_id, error),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn preview_traffic_policy(
+    state: &NodeStateStore,
+    store: &TrafficPolicyTransactionStore,
+    runtime: &NetworkRuntimeManager,
+    gate: &Mutex<()>,
+    recovered: &AtomicBool,
+    embedded: bool,
+    request_id: u64,
+    command: super::NodePreviewTrafficPolicyCommand,
+) -> NodeCommandResult {
+    let _guard = gate.lock().await;
+    if let Err(error) =
+        ensure_traffic_policy_recovered(state, store, runtime, recovered, embedded).await
+    {
+        return traffic_policy_transaction_rejection(request_id, error);
+    }
+    let snapshot = state.snapshot().await;
+    let fallback = match fallback_traffic_policy(&snapshot) {
+        Ok(policy) => policy,
+        Err(error) => return traffic_policy_transaction_rejection(request_id, error),
+    };
+    let context = match validation_context_from_snapshot(&snapshot) {
+        Ok(context) => context,
+        Err(error) => return traffic_policy_transaction_rejection(request_id, error),
+    };
+    let candidate_check = match command.draft.candidate(1) {
+        Ok(candidate) => candidate,
+        Err(error) => return traffic_policy_transaction_rejection(request_id, error),
+    };
+    if let Err(error) = validate_supported_runtime_matchers(&candidate_check) {
+        return traffic_policy_transaction_rejection(request_id, error);
+    }
+    let store = store.clone();
+    match tokio::task::spawn_blocking(move || {
+        store.preview(
+            &fallback,
+            command.expected_revision,
+            command.draft,
+            &context,
+        )
+    })
+    .await
+    {
+        Ok(Ok(preview)) => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::TrafficPolicyPreview(Box::new(preview)),
+        ),
+        Ok(Err(error)) => traffic_policy_transaction_rejection(request_id, error),
+        Err(error) => traffic_policy_transaction_rejection(
+            request_id,
+            TrafficPolicyTransactionError::Persistence(format!(
+                "流量策略预览任务异常终止: {error}"
+            )),
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn preview_traffic_policy_rollback(
+    state: &NodeStateStore,
+    store: &TrafficPolicyTransactionStore,
+    runtime: &NetworkRuntimeManager,
+    gate: &Mutex<()>,
+    recovered: &AtomicBool,
+    embedded: bool,
+    request_id: u64,
+    command: super::NodePreviewTrafficPolicyRollbackCommand,
+) -> NodeCommandResult {
+    let _guard = gate.lock().await;
+    if let Err(error) =
+        ensure_traffic_policy_recovered(state, store, runtime, recovered, embedded).await
+    {
+        return traffic_policy_transaction_rejection(request_id, error);
+    }
+    let snapshot = state.snapshot().await;
+    let fallback = match fallback_traffic_policy(&snapshot) {
+        Ok(policy) => policy,
+        Err(error) => return traffic_policy_transaction_rejection(request_id, error),
+    };
+    let context = match validation_context_from_snapshot(&snapshot) {
+        Ok(context) => context,
+        Err(error) => return traffic_policy_transaction_rejection(request_id, error),
+    };
+    let store = store.clone();
+    match tokio::task::spawn_blocking(move || {
+        store.preview_rollback(
+            &fallback,
+            command.expected_revision,
+            command.target_revision,
+            &context,
+        )
+    })
+    .await
+    {
+        Ok(Ok(preview)) => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::TrafficPolicyPreview(Box::new(preview)),
+        ),
+        Ok(Err(error)) => traffic_policy_transaction_rejection(request_id, error),
+        Err(error) => traffic_policy_transaction_rejection(
+            request_id,
+            TrafficPolicyTransactionError::Persistence(format!(
+                "流量策略回滚预览任务异常终止: {error}"
+            )),
+        ),
+    }
+}
+
+fn candidate_requires_risk_confirmation(
+    candidate: &fuckipv6_common::domain::TrafficPolicy,
+) -> bool {
+    if candidate.failure_policy.direct_fallback.is_some() {
+        return true;
+    }
+    candidate
+        .risk_report()
+        .map(|reports| {
+            reports
+                .iter()
+                .any(|report| report.enabled && !report.risks.is_empty())
+        })
+        .unwrap_or(true)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn apply_traffic_policy(
+    state: &NodeStateStore,
+    store: &TrafficPolicyTransactionStore,
+    runtime: &NetworkRuntimeManager,
+    gate: &Mutex<()>,
+    recovered: &AtomicBool,
+    embedded: bool,
+    request_id: u64,
+    command: super::NodeApplyTrafficPolicyCommand,
+    actor: String,
+    source: String,
+) -> NodeCommandResult {
+    let _guard = gate.lock().await;
+    let current =
+        match ensure_traffic_policy_recovered(state, store, runtime, recovered, embedded).await {
+            Ok(Some(current)) => current,
+            Ok(None) => {
+                return traffic_policy_transaction_rejection(
+                    request_id,
+                    TrafficPolicyTransactionError::CapabilityUnavailable(
+                        "节点身份尚未初始化，无法应用流量策略".into(),
+                    ),
+                );
+            }
+            Err(error) => return traffic_policy_transaction_rejection(request_id, error),
+        };
+    let snapshot = state.snapshot().await;
+    let fallback = match fallback_traffic_policy(&snapshot) {
+        Ok(policy) => policy,
+        Err(error) => return traffic_policy_transaction_rejection(request_id, error),
+    };
+    let context = match validation_context_from_snapshot(&snapshot) {
+        Ok(context) => context,
+        Err(error) => return traffic_policy_transaction_rejection(request_id, error),
+    };
+    let candidate_check = match command.draft.candidate(current.revision.saturating_add(1)) {
+        Ok(candidate) => candidate,
+        Err(error) => return traffic_policy_transaction_rejection(request_id, error),
+    };
+    if let Err(error) = validate_supported_runtime_matchers(&candidate_check) {
+        return traffic_policy_transaction_rejection(request_id, error);
+    }
+    if candidate_requires_risk_confirmation(&candidate_check) && !command.confirm_risk {
+        return NodeCommandResult::rejected(
+            request_id,
+            NodeProblem::new(
+                NodeProblemCode::InvalidRequest,
+                "包含广范围规则或显式直连回退的流量策略必须显式确认风险后才能应用",
+            )
+            .with_message_key("traffic_policy.error.risk_confirmation_required")
+            .with_param("confirm_risk", "required"),
+        );
+    }
+
+    let store_clone = store.clone();
+    let authorization = TrafficPolicyAuthorization::allowed(actor, source);
+    let adapter = ProductionTrafficPolicyRuntimeAdapter::new(
+        runtime.clone(),
+        tokio::runtime::Handle::current(),
+    );
+    let expected_revision = command.expected_revision;
+    let candidate_revision = current.revision.saturating_add(1);
+    match tokio::task::spawn_blocking(move || {
+        store_clone.apply(
+            &fallback,
+            expected_revision,
+            command.draft,
+            &context,
+            &authorization,
+            &adapter,
+        )
+    })
+    .await
+    {
+        Ok(Ok(result)) => {
+            publish_traffic_routing_page(
+                state,
+                runtime,
+                &result.policy,
+                TrafficRoutingWorkflowState::Applied {
+                    revision: result.revision,
+                },
+                embedded,
+            )
+            .await;
+            NodeCommandResult::completed(
+                request_id,
+                NodeCommandOutcome::TrafficPolicyApplied(Box::new(result)),
+            )
+        }
+        Ok(Err(error)) => {
+            if let TrafficPolicyTransactionError::RuntimeFailed {
+                ref stage,
+                ref reason_code,
+                ..
+            } = error
+            {
+                publish_traffic_routing_page(
+                    state,
+                    runtime,
+                    &current.policy,
+                    TrafficRoutingWorkflowState::Failed {
+                        base_revision: current.revision,
+                        candidate_revision,
+                        stage: stage.clone(),
+                        reason_code: reason_code.clone(),
+                    },
+                    embedded,
+                )
+                .await;
+            }
+            traffic_policy_transaction_rejection(request_id, error)
+        }
+        Err(error) => traffic_policy_transaction_rejection(
+            request_id,
+            TrafficPolicyTransactionError::Persistence(format!(
+                "流量策略应用任务异常终止: {error}"
+            )),
+        ),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn rollback_traffic_policy(
+    state: &NodeStateStore,
+    store: &TrafficPolicyTransactionStore,
+    runtime: &NetworkRuntimeManager,
+    gate: &Mutex<()>,
+    recovered: &AtomicBool,
+    embedded: bool,
+    request_id: u64,
+    command: super::NodeRollbackTrafficPolicyCommand,
+    actor: String,
+    source: String,
+) -> NodeCommandResult {
+    let _guard = gate.lock().await;
+    let current =
+        match ensure_traffic_policy_recovered(state, store, runtime, recovered, embedded).await {
+            Ok(Some(current)) => current,
+            Ok(None) => {
+                return traffic_policy_transaction_rejection(
+                    request_id,
+                    TrafficPolicyTransactionError::CapabilityUnavailable(
+                        "节点身份尚未初始化，无法回滚流量策略".into(),
+                    ),
+                );
+            }
+            Err(error) => return traffic_policy_transaction_rejection(request_id, error),
+        };
+    let snapshot = state.snapshot().await;
+    let fallback = match fallback_traffic_policy(&snapshot) {
+        Ok(policy) => policy,
+        Err(error) => return traffic_policy_transaction_rejection(request_id, error),
+    };
+    let context = match validation_context_from_snapshot(&snapshot) {
+        Ok(context) => context,
+        Err(error) => return traffic_policy_transaction_rejection(request_id, error),
+    };
+
+    let preview_store = store.clone();
+    let preview_fallback = fallback.clone();
+    let preview_context = context.clone();
+    let preview = match tokio::task::spawn_blocking(move || {
+        preview_store.preview_rollback(
+            &preview_fallback,
+            command.expected_revision,
+            command.target_revision,
+            &preview_context,
+        )
+    })
+    .await
+    {
+        Ok(Ok(preview)) => preview,
+        Ok(Err(error)) => return traffic_policy_transaction_rejection(request_id, error),
+        Err(error) => {
+            return traffic_policy_transaction_rejection(
+                request_id,
+                TrafficPolicyTransactionError::Persistence(format!(
+                    "流量策略回滚预检任务异常终止: {error}"
+                )),
+            );
+        }
+    };
+    if let Err(error) = validate_supported_runtime_matchers(&preview.candidate) {
+        return traffic_policy_transaction_rejection(request_id, error);
+    }
+    if candidate_requires_risk_confirmation(&preview.candidate) && !command.confirm_risk {
+        return NodeCommandResult::rejected(
+            request_id,
+            NodeProblem::new(
+                NodeProblemCode::InvalidRequest,
+                "回滚目标包含广范围规则或显式直连回退，必须显式确认风险后才能执行",
+            )
+            .with_message_key("traffic_policy.error.risk_confirmation_required")
+            .with_param("confirm_risk", "required"),
+        );
+    }
+
+    let store_clone = store.clone();
+    let authorization = TrafficPolicyAuthorization::allowed(actor, source);
+    let adapter = ProductionTrafficPolicyRuntimeAdapter::new(
+        runtime.clone(),
+        tokio::runtime::Handle::current(),
+    );
+    let candidate_revision = current.revision.saturating_add(1);
+    match tokio::task::spawn_blocking(move || {
+        store_clone.rollback(
+            &fallback,
+            command.expected_revision,
+            command.target_revision,
+            &context,
+            &authorization,
+            &adapter,
+        )
+    })
+    .await
+    {
+        Ok(Ok(result)) => {
+            publish_traffic_routing_page(
+                state,
+                runtime,
+                &result.policy,
+                TrafficRoutingWorkflowState::Applied {
+                    revision: result.revision,
+                },
+                embedded,
+            )
+            .await;
+            NodeCommandResult::completed(
+                request_id,
+                NodeCommandOutcome::TrafficPolicyRolledBack(Box::new(result)),
+            )
+        }
+        Ok(Err(error)) => {
+            if let TrafficPolicyTransactionError::RuntimeFailed {
+                ref stage,
+                ref reason_code,
+                ..
+            } = error
+            {
+                publish_traffic_routing_page(
+                    state,
+                    runtime,
+                    &current.policy,
+                    TrafficRoutingWorkflowState::Failed {
+                        base_revision: current.revision,
+                        candidate_revision,
+                        stage: stage.clone(),
+                        reason_code: reason_code.clone(),
+                    },
+                    embedded,
+                )
+                .await;
+            }
+            traffic_policy_transaction_rejection(request_id, error)
+        }
+        Err(error) => traffic_policy_transaction_rejection(
+            request_id,
+            TrafficPolicyTransactionError::Persistence(format!(
+                "流量策略回滚任务异常终止: {error}"
+            )),
+        ),
+    }
+}
+
+async fn traffic_policy_history(
+    state: &NodeStateStore,
+    store: &TrafficPolicyTransactionStore,
+    runtime: &NetworkRuntimeManager,
+    gate: &Mutex<()>,
+    recovered: &AtomicBool,
+    embedded: bool,
+    request_id: u64,
+) -> NodeCommandResult {
+    let _guard = gate.lock().await;
+    if let Err(error) =
+        ensure_traffic_policy_recovered(state, store, runtime, recovered, embedded).await
+    {
+        return traffic_policy_transaction_rejection(request_id, error);
+    }
+    let snapshot = state.snapshot().await;
+    let fallback = match fallback_traffic_policy(&snapshot) {
+        Ok(policy) => policy,
+        Err(error) => return traffic_policy_transaction_rejection(request_id, error),
+    };
+    let store = store.clone();
+    match tokio::task::spawn_blocking(move || store.history_snapshot(&fallback)).await {
+        Ok(Ok(history)) => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::TrafficPolicyHistory(Box::new(history)),
+        ),
+        Ok(Err(error)) => traffic_policy_transaction_rejection(request_id, error),
+        Err(error) => traffic_policy_transaction_rejection(
+            request_id,
+            TrafficPolicyTransactionError::Persistence(format!(
+                "读取流量策略历史任务异常终止: {error}"
+            )),
         ),
     }
 }

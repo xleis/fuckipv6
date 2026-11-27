@@ -606,8 +606,13 @@ describe("authoritative traffic routing workflow", () => {
       test: testDraft(),
       testResult: null,
     };
+    const unavailableActions = routingActions.map((action) =>
+      action.id === "test_traffic_policy"
+        ? action
+        : { ...action, backend_status: "unavailable" as const },
+    );
     renderWorkflow(noOpOutcome, {
-      actions: routingActions,
+      actions: unavailableActions,
       draft,
     });
 

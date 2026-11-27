@@ -2142,7 +2142,7 @@
           "group": "routing",
           "group_label_key": "action_group.routing",
           "command": "get_traffic_policy",
-          "backend_status": "unavailable",
+          "backend_status": "implemented",
           "permission": "view_state",
           "audit": {
             "policy": "none",
@@ -2158,7 +2158,7 @@
           "group": "routing",
           "group_label_key": "action_group.routing",
           "command": "preview_traffic_policy",
-          "backend_status": "unavailable",
+          "backend_status": "implemented",
           "permission": "change_routing",
           "audit": {
             "policy": "none",
@@ -2189,7 +2189,7 @@
           "group": "routing",
           "group_label_key": "action_group.routing",
           "command": "preview_traffic_policy_rollback",
-          "backend_status": "unavailable",
+          "backend_status": "implemented",
           "permission": "change_routing",
           "audit": {
             "policy": "none",
@@ -2220,7 +2220,7 @@
           "group": "routing",
           "group_label_key": "action_group.routing",
           "command": "apply_traffic_policy",
-          "backend_status": "unavailable",
+          "backend_status": "implemented",
           "permission": "change_routing",
           "audit": {
             "policy": "record_outcome",
@@ -2263,7 +2263,7 @@
           "group": "routing",
           "group_label_key": "action_group.routing",
           "command": "rollback_traffic_policy",
-          "backend_status": "unavailable",
+          "backend_status": "implemented",
           "permission": "change_routing",
           "audit": {
             "policy": "record_outcome",
@@ -2306,7 +2306,7 @@
           "group": "routing",
           "group_label_key": "action_group.routing",
           "command": "get_traffic_policy_history",
-          "backend_status": "unavailable",
+          "backend_status": "implemented",
           "permission": "view_state",
           "audit": {
             "policy": "none",

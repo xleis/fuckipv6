@@ -3,7 +3,7 @@
 > 由 `scripts/feature-evidence-matrix.py` 从共享 manifest 生成并校验：表中的每一行对应 manifest 里的一个可见动作，
 > 证据列必须指向仓库内**真实提到该命令**的文件；缺失或对不上即视为“看起来可用但没有可验证路径”。
 
-- 可见动作：**77**（implemented 71 / 未实现 6）
+- 可见动作：**77**（implemented 77 / 未实现 0）
 - 生成状态：**passed**
 
 | 页面 | 动作 | 命令 | 权限 | 审计策略 | 后端 | 证据 |
@@ -58,12 +58,12 @@
 | `node_runtime` | `revoke_admin_recovery` | `revoke_admin_recovery` | `manage_networks` | `record_outcome` | `implemented` | `crates/client/src/node/command.rs` |
 | `node_runtime` | `execute_admin_recovery` | `execute_admin_recovery` | `manage_networks` | `record_outcome` | `implemented` | `crates/client/src/node/command.rs` |
 | `routing` | `update_routing` | `update_routing` | `change_routing` | `record_outcome` | `implemented` | `crates/client/src/node/command.rs` |
-| `routing` | `get_traffic_policy` | `get_traffic_policy` | `view_state` | `none` | `unavailable` | `crates/client/src/node/command.rs` |
-| `routing` | `preview_traffic_policy` | `preview_traffic_policy` | `change_routing` | `none` | `unavailable` | `crates/client/src/node/command.rs` |
-| `routing` | `preview_traffic_policy_rollback` | `preview_traffic_policy_rollback` | `change_routing` | `none` | `unavailable` | `crates/client/src/node/command.rs` |
-| `routing` | `apply_traffic_policy` | `apply_traffic_policy` | `change_routing` | `record_outcome` | `unavailable` | `crates/client/src/node/command.rs` |
-| `routing` | `rollback_traffic_policy` | `rollback_traffic_policy` | `change_routing` | `record_outcome` | `unavailable` | `crates/client/src/node/command.rs` |
-| `routing` | `get_traffic_policy_history` | `get_traffic_policy_history` | `view_state` | `none` | `unavailable` | `crates/client/src/node/command.rs` |
+| `routing` | `get_traffic_policy` | `get_traffic_policy` | `view_state` | `none` | `implemented` | `crates/client/src/node/command.rs` |
+| `routing` | `preview_traffic_policy` | `preview_traffic_policy` | `change_routing` | `none` | `implemented` | `crates/client/src/node/command.rs` |
+| `routing` | `preview_traffic_policy_rollback` | `preview_traffic_policy_rollback` | `change_routing` | `none` | `implemented` | `crates/client/src/node/command.rs` |
+| `routing` | `apply_traffic_policy` | `apply_traffic_policy` | `change_routing` | `record_outcome` | `implemented` | `crates/client/src/node/command.rs` |
+| `routing` | `rollback_traffic_policy` | `rollback_traffic_policy` | `change_routing` | `record_outcome` | `implemented` | `crates/client/src/node/command.rs` |
+| `routing` | `get_traffic_policy_history` | `get_traffic_policy_history` | `view_state` | `none` | `implemented` | `crates/client/src/node/command.rs` |
 | `routing` | `test_traffic_policy` | `test_traffic_policy` | `change_routing` | `none` | `implemented` | `crates/client/src/node/command.rs` |
 | `exit_node` | `set_local_exit_capability` | `set_local_exit_capability` | `manage_networks` | `record_outcome` | `implemented` | `crates/client/src/node/command.rs` |
 | `exit_node` | `set_exit_node_role` | `set_network_role` | `manage_roles` | `record_outcome` | `implemented` | `crates/client/src/node/command.rs` |

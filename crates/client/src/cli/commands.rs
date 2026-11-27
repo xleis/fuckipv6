@@ -6,8 +6,9 @@ use fuckipv6_common::domain::{
     InvitationRedeemRequest, MembershipRole, MembershipState, NetworkId, NetworkMemberDirectory,
     NetworkRole, NodeId, OperationId, PermissionIntent, PermissionRequest, PolicyAction,
     RelayCandidate, RelayGovernanceAction, RelayHealthStatus, RelayLimitPolicy, RelayMemberGrant,
-    RelaySelectionPolicy, ResourceKind, ResourceRef, SharedPath, TrafficFailureKind,
-    TrafficProtectionState, TrafficSessionSnapshot, TransferId, TransferState,
+    RelaySelectionPolicy, ResourceKind, ResourceRef, SharedPath, TrafficAction, TrafficFailureKind,
+    TrafficFailureRouteContext, TrafficPolicy, TrafficProtectionState, TrafficSessionSnapshot,
+    TransferId, TransferState,
 };
 #[cfg(test)]
 use fuckipv6_common::is_encrypted_config_path;
@@ -93,7 +94,7 @@ use crate::signaling::client::{SignalingClient, SignalingEvent};
 use crate::stats::StatsCollector;
 use crate::tun::TunDevice;
 #[cfg(target_os = "linux")]
-use fuckipv6_common::domain::{TrafficAction, TrafficFailurePolicy, TrafficFailureRouteContext};
+use fuckipv6_common::domain::TrafficFailurePolicy;
 use fuckipv6_secure_session::{AEAD_TAG_LEN, DATA_HEADER_LEN};
 
 const TUN_PACKET_BUFFER_SIZE: usize = 65536;
@@ -705,6 +706,9 @@ pub(crate) struct ClientRuntime {
     pub(crate) stats: StatsCollector,
     pub(crate) acl: fuckipv6_common::AclEngine,
     pub(crate) route_engine: SmartRouteEngine,
+    pub(crate) active_traffic_policy: Option<TrafficPolicy>,
+    pub(crate) traffic_policy_observer:
+        crate::traffic_policy_runtime::TrafficPolicyObservationCollector,
     pub(crate) exit_node_manager: ExitNodeManager,
     pub(crate) exit_contribution_gate: ExitContributionGate,
     exit_selection_gate: ExitSelectionGate,
@@ -2031,6 +2035,9 @@ pub(crate) async fn prepare_client_runtime_ext(
         stats,
         acl,
         route_engine,
+        active_traffic_policy: None,
+        traffic_policy_observer:
+            crate::traffic_policy_runtime::TrafficPolicyObservationCollector::new(),
         exit_node_manager,
         exit_contribution_gate,
         exit_selection_gate,
@@ -4623,6 +4630,39 @@ async fn handle_runtime_command(
             let _ = reply.send(Ok(local_exit_runtime_status(runtime)));
             RuntimeCommandOutcome::Continue
         }
+        ipc::RuntimeCommand::ApplyTrafficPolicy { policy, reply } => {
+            let result = match policy.validate() {
+                Ok(()) => {
+                    runtime.active_traffic_policy = Some(*policy);
+                    runtime.traffic_policy_observer.activate(unix_time_ms());
+                    Ok(())
+                }
+                Err(error) => Err(format!("流量策略校验失败: {error}")),
+            };
+            let _ = reply.send(result);
+            RuntimeCommandOutcome::Continue
+        }
+        ipc::RuntimeCommand::VerifyTrafficPolicy {
+            expected_revision,
+            expected_content_hash,
+            reply,
+        } => {
+            let verified = runtime
+                .active_traffic_policy
+                .as_ref()
+                .and_then(|policy| {
+                    policy.content_hash().ok().map(|hash| {
+                        policy.revision == expected_revision && hash == expected_content_hash
+                    })
+                })
+                .unwrap_or(false);
+            let _ = reply.send(Ok(verified));
+            RuntimeCommandOutcome::Continue
+        }
+        ipc::RuntimeCommand::TrafficPolicyObservation { reply } => {
+            let _ = reply.send(runtime.traffic_policy_observer.snapshot(true));
+            RuntimeCommandOutcome::Continue
+        }
         ipc::RuntimeCommand::Disconnect { reply } => {
             tracing::info!("收到本地控制接口的断开请求，等待 launcher 完成资源清理");
             RuntimeCommandOutcome::Disconnect(reply)
@@ -5388,11 +5428,14 @@ async fn handle_tun_reader_packet(runtime: &mut ClientRuntime, packet: TunPacket
 
     let selected_exit = runtime.exit_for_packet(unix_time_ms()).await;
 
-    let Some((src_ip, dst_ip)) = route_tun_packet(
+    let Some((src_ip, dst_ip)) = route_tun_packet_with_policy(
         &runtime.p2p,
         &runtime.assigned_ips,
         &runtime.route_engine,
         selected_exit.as_ref(),
+        runtime.active_traffic_policy.as_ref(),
+        runtime.network_id.as_ref(),
+        Some(&mut runtime.traffic_policy_observer),
         payload,
     )
     .await
@@ -7081,13 +7124,38 @@ pub(crate) async fn shutdown_signal() {
     }
 }
 
-/// 处理从TUN设备读取的数据包
+/// 处理从TUN设备读取的数据包（供既有单元测试使用的无流量策略包装）
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 async fn route_tun_packet(
     p2p: &P2pEngine,
     assigned_ips: &VirtualIps,
     route_engine: &SmartRouteEngine,
     selected_exit: Option<&NodeId>,
+    packet: &[u8],
+) -> Option<(IpAddr, IpAddr)> {
+    route_tun_packet_with_policy(
+        p2p,
+        assigned_ips,
+        route_engine,
+        selected_exit,
+        None,
+        None,
+        None,
+        packet,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn route_tun_packet_with_policy(
+    p2p: &P2pEngine,
+    assigned_ips: &VirtualIps,
+    route_engine: &SmartRouteEngine,
+    selected_exit: Option<&NodeId>,
+    active_traffic_policy: Option<&TrafficPolicy>,
+    network_id: Option<&NetworkId>,
+    observer: Option<&mut crate::traffic_policy_runtime::TrafficPolicyObservationCollector>,
     packet: &[u8],
 ) -> Option<(IpAddr, IpAddr)> {
     let dst_ip = tun_packet_destination(packet)?;
@@ -7097,6 +7165,67 @@ async fn route_tun_packet(
     // 智能分流与出口网关决策
     let target_dst = if is_peer_ip {
         dst_ip
+    } else if let Some(policy) = active_traffic_policy {
+        let Some((flow, decision)) =
+            crate::traffic_policy_runtime::evaluate_tun_packet(policy, packet)
+        else {
+            tracing::debug!(
+                "流量策略无法解析数据包传输层头部，按失败关闭丢弃: {}",
+                dst_ip
+            );
+            return None;
+        };
+        if let Some(observer) = observer {
+            observer.record_flow(unix_time_ms(), flow);
+        }
+        match decision.action {
+            TrafficAction::Direct => {
+                tracing::trace!("流量策略判定为 Direct 直连，跳过封装: {}", dst_ip);
+                return None;
+            }
+            TrafficAction::Reject => {
+                tracing::debug!("流量策略判定为 Reject 阻断: {}", dst_ip);
+                return None;
+            }
+            TrafficAction::Network(ref target_network_id) => {
+                if network_id == Some(target_network_id) {
+                    dst_ip
+                } else {
+                    tracing::trace!(
+                        "流量策略指向网络 {}，当前会话不转发该数据包: {}",
+                        target_network_id,
+                        dst_ip
+                    );
+                    return None;
+                }
+            }
+            TrafficAction::Exit(ref exit_node_id) => {
+                if let Some(target_v6) = p2p.resolve_exit_peer_by_node_id(exit_node_id).await {
+                    tracing::debug!(
+                        "流量策略判定经由 Exit Node {} ({}) 转发流量至 {}",
+                        exit_node_id,
+                        target_v6,
+                        dst_ip
+                    );
+                    IpAddr::V6(target_v6)
+                } else {
+                    let route_context = TrafficFailureRouteContext {
+                        requested_action: TrafficAction::Exit(exit_node_id.clone()),
+                        fixed_exit: selected_exit.cloned(),
+                        fixed_network: None,
+                    };
+                    let failure_decision =
+                        policy.decide_failure(&route_context, TrafficFailureKind::ExitUnavailable);
+                    tracing::warn!(
+                        exit = %exit_node_id,
+                        destination = %dst_ip,
+                        decision = ?failure_decision.map(|decision| decision.outcome),
+                        "流量策略指定的 Exit 不可用或未获授权，按失败关闭丢弃数据包"
+                    );
+                    return None;
+                }
+            }
+        }
     } else {
         match route_engine.evaluate(dst_ip) {
             RoutingAction::Mesh => dst_ip,
@@ -11841,6 +11970,151 @@ mod tests {
             assert_eq!(call.src_ip, IpAddr::V6(ip_a));
             assert_eq!(call.dst_ip, IpAddr::V6(ip_b));
             assert_ne!(call.src_ip, IpAddr::V6(spoofed_source));
+        }
+
+        // Verify live TrafficPolicy enforcement and real observed flow capture on the TUN path.
+        use fuckipv6_common::domain::{
+            IpCidr, PortRange, TrafficDefaultConfirmedBy, TrafficDefaultPolicy,
+            TrafficFailurePolicy, TrafficMatch, TrafficProtocol, TrafficRoutingObservation,
+            TrafficRule, TrafficRuleId,
+        };
+        let self_node_id = NodeId::from_public_key(&[9u8; 32]);
+        let missing_exit_id = NodeId::from_public_key(&[88u8; 32]);
+        let policy = TrafficPolicy {
+            node_id: self_node_id,
+            revision: 2,
+            default_policy: TrafficDefaultPolicy {
+                action: TrafficAction::Direct,
+                confirmed_by: TrafficDefaultConfirmedBy::Owner,
+                confirmed_at_unix_ms: 100,
+            },
+            failure_policy: TrafficFailurePolicy::fail_closed(),
+            rules: vec![
+                TrafficRule {
+                    rule_id: TrafficRuleId::from_public_key(b"rule-reject-443"),
+                    priority: 1,
+                    enabled: true,
+                    matcher: TrafficMatch {
+                        destination_cidrs: vec![IpCidr::parse("198.51.100.0/24").expect("cidr")],
+                        destination_ports: vec![PortRange {
+                            start: 443,
+                            end: 443,
+                        }],
+                        protocols: vec![TrafficProtocol::Tcp],
+                        ..TrafficMatch::default()
+                    },
+                    action: TrafficAction::Reject,
+                    description: "reject tcp 443".into(),
+                },
+                TrafficRule {
+                    rule_id: TrafficRuleId::from_public_key(b"rule-exit-v6"),
+                    priority: 2,
+                    enabled: true,
+                    matcher: TrafficMatch {
+                        destination_cidrs: vec![
+                            IpCidr::parse("2606:4700:4700::/48").expect("v6 cidr")
+                        ],
+                        destination_ports: vec![PortRange {
+                            start: 443,
+                            end: 443,
+                        }],
+                        protocols: vec![TrafficProtocol::Udp],
+                        ..TrafficMatch::default()
+                    },
+                    action: TrafficAction::Exit(exit_node_id.clone()),
+                    description: "route quic to authorized exit".into(),
+                },
+                TrafficRule {
+                    rule_id: TrafficRuleId::from_public_key(b"rule-missing-exit"),
+                    priority: 3,
+                    enabled: true,
+                    matcher: TrafficMatch {
+                        destination_cidrs: vec![IpCidr::parse("203.0.113.0/24").expect("cidr")],
+                        protocols: vec![TrafficProtocol::Tcp],
+                        ..TrafficMatch::default()
+                    },
+                    action: TrafficAction::Exit(missing_exit_id),
+                    description: "missing exit must fail closed".into(),
+                },
+            ],
+        };
+        let mut observer = crate::traffic_policy_runtime::TrafficPolicyObservationCollector::new();
+        observer.activate(1_000);
+
+        let mut v4_reject = vec![0u8; 24];
+        v4_reject[0] = 0x45;
+        v4_reject[9] = 6;
+        v4_reject[12..16].copy_from_slice(&[10, 8, 0, 2]);
+        v4_reject[16..20].copy_from_slice(&[198, 51, 100, 10]);
+        v4_reject[22..24].copy_from_slice(&443u16.to_be_bytes());
+        assert!(
+            route_tun_packet_with_policy(
+                &engine_a,
+                &assigned_ips,
+                &route_engine,
+                Some(&exit_node_id),
+                Some(&policy),
+                None,
+                Some(&mut observer),
+                &v4_reject,
+            )
+            .await
+            .is_none(),
+            "Reject rule must drop matching packet"
+        );
+
+        let mut v6_exit = vec![0u8; 48];
+        v6_exit[0] = 0x60;
+        v6_exit[6] = 17;
+        v6_exit[8..24].copy_from_slice(&spoofed_source.octets());
+        v6_exit[24..40].copy_from_slice(&public_destination.octets());
+        v6_exit[42..44].copy_from_slice(&443u16.to_be_bytes());
+        let policy_routed = route_tun_packet_with_policy(
+            &engine_a,
+            &assigned_ips,
+            &route_engine,
+            None,
+            Some(&policy),
+            None,
+            Some(&mut observer),
+            &v6_exit,
+        )
+        .await
+        .context("TrafficPolicy Exit rule must route to authorized Exit peer")?;
+        assert_eq!(policy_routed, (IpAddr::V6(ip_a), IpAddr::V6(ip_b)));
+
+        let mut v4_missing_exit = vec![0u8; 24];
+        v4_missing_exit[0] = 0x45;
+        v4_missing_exit[9] = 6;
+        v4_missing_exit[12..16].copy_from_slice(&[10, 8, 0, 2]);
+        v4_missing_exit[16..20].copy_from_slice(&[203, 0, 113, 5]);
+        v4_missing_exit[22..24].copy_from_slice(&80u16.to_be_bytes());
+        assert!(
+            route_tun_packet_with_policy(
+                &engine_a,
+                &assigned_ips,
+                &route_engine,
+                Some(&exit_node_id),
+                Some(&policy),
+                None,
+                Some(&mut observer),
+                &v4_missing_exit,
+            )
+            .await
+            .is_none(),
+            "Unavailable Exit must fail closed without falling back to another Exit"
+        );
+
+        match observer.snapshot(true) {
+            TrafficRoutingObservation::Available {
+                observed_flow_count,
+                hits,
+                ..
+            } => {
+                assert_eq!(observed_flow_count, 3);
+                assert_eq!(hits.len(), 3);
+            }
+            other => panic!("expected available observation with 3 recorded hits, got {other:?}"),
         }
         assert_eq!(relay_call.encrypted, signaling_call.encrypted);
         assert_eq!(

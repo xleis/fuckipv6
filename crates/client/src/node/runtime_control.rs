@@ -7,19 +7,20 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuckipv6_common::domain::{
-    AdminRecoveryStatusView, CoordinatorCandidateConfig, CoordinatorCandidateDeclaration,
-    CoordinatorCandidateStatus, CoordinatorEmergencyLeaderStatus, CoordinatorRecoveryReport,
-    CoordinatorRecoveryStatus, CoordinatorTerm, CoordinatorWriteCredential, ExitHealthEvidence,
-    ExitHealthEvidenceState, ExitHealthLayer, ExitHealthProtocol, ExitHealthRetest,
-    ExitHealthRetestPhase, ExitHealthSnapshot, ExitHealthSource, ExitHealthTarget, InvitationCode,
-    InvitationCreateRequest, InvitationId, InvitationPreview, InvitationRedeemRequest,
-    InvitationRedemption, InvitationStatusView, IssuedInvitation, JoinRequest, JoinRequestId,
-    LeakDetectionEvidence, LeakDetectionEvidenceState, LeakDetectionIsolationAction,
-    LeakDetectionProtocol, LeakDetectionSnapshot, LeakDetectionSource, LeakDetectionTarget,
-    MemberLifecycleChange, MemberLifecycleChangeRequest, MemberRemovalPreview,
-    MemberRemovalPreviewRequest, MembershipRole, NetworkId, NetworkMemberDirectory, NodeId,
-    RelayAuthorizationAuditSnapshot, RelayGovernanceAuditSnapshot, RelayHealthSnapshot,
-    TrafficProtectionState,
+    AdminRecoveryStatusView, ContentHash, CoordinatorCandidateConfig,
+    CoordinatorCandidateDeclaration, CoordinatorCandidateStatus, CoordinatorEmergencyLeaderStatus,
+    CoordinatorRecoveryReport, CoordinatorRecoveryStatus, CoordinatorTerm,
+    CoordinatorWriteCredential, ExitHealthEvidence, ExitHealthEvidenceState, ExitHealthLayer,
+    ExitHealthProtocol, ExitHealthRetest, ExitHealthRetestPhase, ExitHealthSnapshot,
+    ExitHealthSource, ExitHealthTarget, InvitationCode, InvitationCreateRequest, InvitationId,
+    InvitationPreview, InvitationRedeemRequest, InvitationRedemption, InvitationStatusView,
+    IssuedInvitation, JoinRequest, JoinRequestId, LeakDetectionEvidence,
+    LeakDetectionEvidenceState, LeakDetectionIsolationAction, LeakDetectionProtocol,
+    LeakDetectionSnapshot, LeakDetectionSource, LeakDetectionTarget, MemberLifecycleChange,
+    MemberLifecycleChangeRequest, MemberRemovalPreview, MemberRemovalPreviewRequest,
+    MembershipRole, NetworkId, NetworkMemberDirectory, NodeId, RelayAuthorizationAuditSnapshot,
+    RelayGovernanceAuditSnapshot, RelayHealthSnapshot, TrafficPolicy, TrafficProtectionState,
+    TrafficRoutingObservation,
 };
 use fuckipv6_common::{
     ClientConfig, ExitNodeCapabilities, ExitNodeUnsupportedReason, JoinRequestBatchReviewItem,
@@ -2085,6 +2086,18 @@ enum RuntimeControlCommand {
         command: NodeUpdateRoutingCommand,
         reply: oneshot::Sender<Result<ipc::RoutingUpdateResult, RuntimeControlError>>,
     },
+    ApplyTrafficPolicy {
+        policy: Box<TrafficPolicy>,
+        reply: oneshot::Sender<Result<(), RuntimeControlError>>,
+    },
+    VerifyTrafficPolicy {
+        expected_revision: u64,
+        expected_content_hash: ContentHash,
+        reply: oneshot::Sender<Result<(), RuntimeControlError>>,
+    },
+    TrafficPolicyObservation {
+        reply: oneshot::Sender<TrafficRoutingObservation>,
+    },
     SetNetworkRole {
         command: NodeSetNetworkRoleCommand,
         reply: oneshot::Sender<Result<RoleUpdateResult, RuntimeControlError>>,
@@ -2567,6 +2580,7 @@ impl NetworkRuntimeManager {
                 completed_cleanup: BTreeMap::new(),
                 timeouts,
                 coordinator_takeover_wakeups,
+                active_traffic_policy: None,
             },
         ));
         Self {
@@ -3306,6 +3320,56 @@ impl NetworkRuntimeManager {
             .map_err(|_| RuntimeControlError::ActorClosed)?
     }
 
+    pub(crate) async fn apply_traffic_policy(
+        &self,
+        policy: TrafficPolicy,
+    ) -> Result<(), RuntimeControlError> {
+        let (reply, response) = oneshot::channel();
+        self.send(RuntimeControlCommand::ApplyTrafficPolicy {
+            policy: Box::new(policy),
+            reply,
+        })
+        .await?;
+        response
+            .await
+            .map_err(|_| RuntimeControlError::ActorClosed)?
+    }
+
+    pub(crate) async fn verify_traffic_policy(
+        &self,
+        expected_revision: u64,
+        expected_content_hash: ContentHash,
+    ) -> Result<(), RuntimeControlError> {
+        let (reply, response) = oneshot::channel();
+        self.send(RuntimeControlCommand::VerifyTrafficPolicy {
+            expected_revision,
+            expected_content_hash,
+            reply,
+        })
+        .await?;
+        response
+            .await
+            .map_err(|_| RuntimeControlError::ActorClosed)?
+    }
+
+    pub(crate) async fn traffic_policy_observation(&self) -> TrafficRoutingObservation {
+        let (reply, response) = oneshot::channel();
+        if self
+            .send(RuntimeControlCommand::TrafficPolicyObservation { reply })
+            .await
+            .is_err()
+        {
+            return TrafficRoutingObservation::unavailable(
+                crate::traffic_policy_runtime::OBSERVATION_UNAVAILABLE_REASON,
+            );
+        }
+        response.await.unwrap_or_else(|_| {
+            TrafficRoutingObservation::unavailable(
+                crate::traffic_policy_runtime::OBSERVATION_UNAVAILABLE_REASON,
+            )
+        })
+    }
+
     pub async fn diagnostics(&self) -> Result<NodeDiagnosticsSnapshot, RuntimeControlError> {
         let (_cancel_sender, cancel) = watch::channel(false);
         self.diagnostics_cancellable(cancel).await
@@ -3389,6 +3453,24 @@ async fn run_actor(
                     RuntimeControlCommand::LiveTunNames { reply } => {
                         let result = actor.live_tun_names().await;
                         let _ = reply.send(result);
+                    }
+                    RuntimeControlCommand::ApplyTrafficPolicy { policy, reply } => {
+                        let result = actor.apply_traffic_policy(*policy).await;
+                        let _ = reply.send(result);
+                    }
+                    RuntimeControlCommand::VerifyTrafficPolicy {
+                        expected_revision,
+                        expected_content_hash,
+                        reply,
+                    } => {
+                        let result = actor
+                            .verify_traffic_policy(expected_revision, expected_content_hash)
+                            .await;
+                        let _ = reply.send(result);
+                    }
+                    RuntimeControlCommand::TrafficPolicyObservation { reply } => {
+                        let observation = actor.traffic_policy_observation().await;
+                        let _ = reply.send(observation);
                     }
                     RuntimeControlCommand::StartPlan {
                         plan,
@@ -3569,9 +3651,143 @@ struct NetworkRuntimeActor {
     completed_cleanup: BTreeMap<String, RuntimeCleanupOutcome>,
     timeouts: RuntimeTimeouts,
     coordinator_takeover_wakeups: Option<mpsc::UnboundedReceiver<()>>,
+    active_traffic_policy: Option<TrafficPolicy>,
 }
 
 impl NetworkRuntimeActor {
+    async fn apply_traffic_policy(
+        &mut self,
+        policy: TrafficPolicy,
+    ) -> Result<(), RuntimeControlError> {
+        self.reconcile_finished_sessions().await;
+        if let Err(error) = policy.validate() {
+            return Err(RuntimeControlError::Invalid(format!(
+                "流量策略无效: {error}"
+            )));
+        }
+
+        if self.sessions.is_empty() {
+            self.active_traffic_policy = Some(policy);
+            return Ok(());
+        }
+
+        let wait = self.timeouts.routing_update;
+        let requests = self
+            .sessions
+            .iter()
+            .map(|(network_name, session)| {
+                let network_name = network_name.clone();
+                let routing_control = session.routing_control.clone();
+                let policy = policy.clone();
+                async move {
+                    let result =
+                        request_runtime_apply_traffic_policy(&routing_control, policy, wait).await;
+                    (network_name, result)
+                }
+            })
+            .collect::<Vec<_>>();
+
+        for (network_name, result) in join_all(requests).await {
+            if let Err(error) = result {
+                return Err(RuntimeControlError::Unavailable(format!(
+                    "网络 [{network_name}] 安装流量策略失败: {}",
+                    describe_routing_request_failure(&error)
+                )));
+            }
+        }
+
+        self.active_traffic_policy = Some(policy);
+        Ok(())
+    }
+
+    async fn verify_traffic_policy(
+        &mut self,
+        expected_revision: u64,
+        expected_content_hash: ContentHash,
+    ) -> Result<(), RuntimeControlError> {
+        self.reconcile_finished_sessions().await;
+        let active = self.active_traffic_policy.as_ref().ok_or_else(|| {
+            RuntimeControlError::Unavailable("运行时管理器尚未持有已安装的流量策略".into())
+        })?;
+        let active_hash = active.content_hash().map_err(|error| {
+            RuntimeControlError::Invalid(format!("计算已安装流量策略哈希失败: {error}"))
+        })?;
+        if active.revision != expected_revision || active_hash != expected_content_hash {
+            return Err(RuntimeControlError::Unavailable(format!(
+                "运行时管理器流量策略校验不匹配: 期望 revision={expected_revision}，实际 revision={}",
+                active.revision
+            )));
+        }
+
+        if self.sessions.is_empty() {
+            return Ok(());
+        }
+
+        let wait = self.timeouts.routing_update;
+        let requests = self
+            .sessions
+            .iter()
+            .map(|(network_name, session)| {
+                let network_name = network_name.clone();
+                let routing_control = session.routing_control.clone();
+                let expected_content_hash = expected_content_hash.clone();
+                async move {
+                    let result = request_runtime_verify_traffic_policy(
+                        &routing_control,
+                        expected_revision,
+                        expected_content_hash,
+                        wait,
+                    )
+                    .await;
+                    (network_name, result)
+                }
+            })
+            .collect::<Vec<_>>();
+
+        for (network_name, result) in join_all(requests).await {
+            match result {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(RuntimeControlError::Unavailable(format!(
+                        "网络 [{network_name}] 活动会话未确认目标流量策略 revision {expected_revision}"
+                    )));
+                }
+                Err(error) => {
+                    return Err(RuntimeControlError::Unavailable(format!(
+                        "校验网络 [{network_name}] 流量策略状态失败: {}",
+                        describe_routing_request_failure(&error)
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn traffic_policy_observation(&mut self) -> TrafficRoutingObservation {
+        self.reconcile_finished_sessions().await;
+        if self.sessions.is_empty() {
+            return TrafficRoutingObservation::unavailable(
+                crate::traffic_policy_runtime::OBSERVATION_UNAVAILABLE_REASON,
+            );
+        }
+
+        let wait = LOCAL_EXIT_STATUS_REFRESH_TIMEOUT;
+        let requests =
+            self.sessions
+                .values()
+                .map(|session| {
+                    let routing_control = session.routing_control.clone();
+                    async move {
+                        request_runtime_traffic_policy_observation(&routing_control, wait).await
+                    }
+                })
+                .collect::<Vec<_>>();
+
+        let observations = join_all(requests).await.into_iter().flatten();
+        crate::traffic_policy_runtime::merge_observations(observations)
+    }
+
     async fn local_exit_owner_intent(&self) -> Result<bool, RuntimeControlError> {
         self.configs.node_local_exit_enabled().map_err(|error| {
             RuntimeControlError::Persistence(format!("读取本机 Exit owner intent 失败: {error:#}"))
@@ -5543,8 +5759,9 @@ impl NetworkRuntimeActor {
         self.cleanup_failures.remove(&network_name);
         self.retained_owners.remove(&network_name);
         self.completed_cleanup.remove(&network_name);
+        let session_routing_control = started.routing_control.clone();
         self.sessions.insert(
-            network_name,
+            network_name.clone(),
             NetworkRuntimeSession {
                 network_id: started.network_id,
                 signaling: started.signaling,
@@ -5557,6 +5774,21 @@ impl NetworkRuntimeActor {
                 handle: started.handle,
             },
         );
+        if let Some(policy) = self.active_traffic_policy.clone() {
+            if let Err(error) = request_runtime_apply_traffic_policy(
+                &session_routing_control,
+                policy,
+                self.timeouts.routing_update,
+            )
+            .await
+            {
+                tracing::warn!(
+                    network_name,
+                    error = %describe_routing_request_failure(&error),
+                    "新启动网络同步已应用流量策略失败"
+                );
+            }
+        }
         self.refresh_local_exit_capability_state().await;
         Ok(())
     }
@@ -8343,6 +8575,65 @@ async fn request_runtime_local_exit_status(
     }
 }
 
+async fn request_runtime_apply_traffic_policy(
+    routing_control: &mpsc::UnboundedSender<ipc::RuntimeCommand>,
+    policy: TrafficPolicy,
+    wait: Duration,
+) -> Result<(), RuntimeRoutingRequestError> {
+    let (reply, response) = oneshot::channel();
+    routing_control
+        .send(ipc::RuntimeCommand::ApplyTrafficPolicy {
+            policy: Box::new(policy),
+            reply,
+        })
+        .map_err(|_| RuntimeRoutingRequestError::ControlClosed)?;
+
+    match timeout(wait, response).await {
+        Err(_) => Err(RuntimeRoutingRequestError::TimedOut(wait)),
+        Ok(Err(_)) => Err(RuntimeRoutingRequestError::ResponseClosed),
+        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Err(error))) => Err(RuntimeRoutingRequestError::Rejected(error)),
+    }
+}
+
+async fn request_runtime_verify_traffic_policy(
+    routing_control: &mpsc::UnboundedSender<ipc::RuntimeCommand>,
+    expected_revision: u64,
+    expected_content_hash: ContentHash,
+    wait: Duration,
+) -> Result<bool, RuntimeRoutingRequestError> {
+    let (reply, response) = oneshot::channel();
+    routing_control
+        .send(ipc::RuntimeCommand::VerifyTrafficPolicy {
+            expected_revision,
+            expected_content_hash,
+            reply,
+        })
+        .map_err(|_| RuntimeRoutingRequestError::ControlClosed)?;
+
+    match timeout(wait, response).await {
+        Err(_) => Err(RuntimeRoutingRequestError::TimedOut(wait)),
+        Ok(Err(_)) => Err(RuntimeRoutingRequestError::ResponseClosed),
+        Ok(Ok(Ok(verified))) => Ok(verified),
+        Ok(Ok(Err(error))) => Err(RuntimeRoutingRequestError::Rejected(error)),
+    }
+}
+
+async fn request_runtime_traffic_policy_observation(
+    routing_control: &mpsc::UnboundedSender<ipc::RuntimeCommand>,
+    wait: Duration,
+) -> Option<TrafficRoutingObservation> {
+    let (reply, response) = oneshot::channel();
+    routing_control
+        .send(ipc::RuntimeCommand::TrafficPolicyObservation { reply })
+        .ok()?;
+
+    match timeout(wait, response).await {
+        Ok(Ok(observation)) => Some(observation),
+        _ => None,
+    }
+}
+
 pub(crate) fn local_exit_unsupported_error(
     capabilities: &ExitNodeCapabilities,
 ) -> Option<RuntimeControlError> {
@@ -9104,6 +9395,9 @@ mod tests {
                 let cleanup_p2p = p2p.clone();
                 let (shutdown, mut shutdown_rx) = watch::channel(false);
                 let handle = tokio::spawn(async move {
+                    let mut installed_traffic_policy: Option<TrafficPolicy> = None;
+                    let mut traffic_policy_observer =
+                        crate::traffic_policy_runtime::TrafficPolicyObservationCollector::new();
                     loop {
                         tokio::select! {
                             changed = shutdown_rx.changed() => {
@@ -9366,6 +9660,36 @@ mod tests {
                                         let _ =
                                             reply.send(Err("测试运行时不支持 File 传输".into()));
                                     }
+                                    ipc::RuntimeCommand::ApplyTrafficPolicy { policy, reply } => {
+                                        let result = match policy.validate() {
+                                            Ok(()) => {
+                                                installed_traffic_policy = Some(*policy);
+                                                traffic_policy_observer.activate(unix_time_ms());
+                                                Ok(())
+                                            }
+                                            Err(error) => Err(error.to_string()),
+                                        };
+                                        let _ = reply.send(result);
+                                    }
+                                    ipc::RuntimeCommand::VerifyTrafficPolicy {
+                                        expected_revision,
+                                        expected_content_hash,
+                                        reply,
+                                    } => {
+                                        let verified = installed_traffic_policy
+                                            .as_ref()
+                                            .and_then(|policy| {
+                                                policy.content_hash().ok().map(|hash| {
+                                                    policy.revision == expected_revision
+                                                        && hash == expected_content_hash
+                                                })
+                                            })
+                                            .unwrap_or(false);
+                                        let _ = reply.send(Ok(verified));
+                                    }
+                                    ipc::RuntimeCommand::TrafficPolicyObservation { reply } => {
+                                        let _ = reply.send(traffic_policy_observer.snapshot(true));
+                                    }
                                     ipc::RuntimeCommand::Disconnect { reply } => {
                                         let _ = reply.send(Ok(()));
                                         break;
@@ -9547,6 +9871,7 @@ mod tests {
             completed_cleanup: BTreeMap::new(),
             timeouts: RuntimeTimeouts::default(),
             coordinator_takeover_wakeups: Some(coordinator_takeover_wakeups),
+            active_traffic_policy: None,
         };
         let (command_tx, command_rx) = mpsc::channel(8);
         let task = tokio::spawn(run_actor(command_rx, actor));
@@ -10357,6 +10682,7 @@ mod tests {
             completed_cleanup: BTreeMap::new(),
             timeouts: RuntimeTimeouts::default(),
             coordinator_takeover_wakeups: None,
+            active_traffic_policy: None,
         };
 
         let response_client = signaling.clone();
@@ -10599,6 +10925,7 @@ mod tests {
                 ..RuntimeTimeouts::default()
             },
             coordinator_takeover_wakeups: Some(wakeup_rx),
+            active_traffic_policy: None,
         };
         let actor_task = tokio::spawn(run_actor(command_rx, actor));
 
@@ -10831,6 +11158,7 @@ mod tests {
             completed_cleanup: BTreeMap::new(),
             timeouts: RuntimeTimeouts::default(),
             coordinator_takeover_wakeups: None,
+            active_traffic_policy: None,
         };
 
         let response_client = signaling.clone();
@@ -15859,6 +16187,450 @@ mod tests {
         })
         .await
         .expect("actor did not release the cancelled start operation");
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn production_traffic_policy_commands_enforce_lifecycle_observation_and_fail_closed_gates(
+    ) {
+        use crate::node::{
+            NodeApplyTrafficPolicyCommand, NodeCommand, NodeCommandContext, NodeCommandOutcome,
+            NodeCommandRequest, NodePermission, NodePreviewTrafficPolicyCommand,
+            NodePreviewTrafficPolicyRollbackCommand, NodeRollbackTrafficPolicyCommand,
+        };
+        use crate::traffic_policy_transaction::TrafficPolicyDraft;
+        use crate::tun::{TunCapabilities, TunCapabilityReason, TunPlatform};
+        use fuckipv6_common::domain::{
+            ApplicationIdentity, DomainSuffix, IpCidr, PortRange, TrafficAction,
+            TrafficDefaultConfirmedBy, TrafficDefaultPolicy, TrafficFailurePolicy, TrafficMatch,
+            TrafficProtocol, TrafficRoutingObservation, TrafficRoutingWorkflowState, TrafficRule,
+            TrafficRuleId,
+        };
+
+        let harness = TestHarness::new("traffic-policy-e2e").await;
+        let self_node_id = NodeId::from_public_key(&[7u8; 32]);
+        let exit_node_id = NodeId::from_public_key(&[8u8; 32]);
+        harness
+            .state
+            .update(|snapshot| {
+                snapshot.identity = Some(NodeIdentitySnapshot {
+                    node_id: self_node_id.to_string(),
+                    public_key_fingerprint: "11".repeat(16),
+                    display_name: Some("Self".into()),
+                    created_at_unix_ms: Some(1_000),
+                });
+                snapshot.permissions.permissions =
+                    vec![NodePermission::ViewState, NodePermission::ChangeRouting];
+                snapshot.tun_capabilities = TunCapabilities {
+                    schema_version: crate::tun::TUN_CAPABILITY_SCHEMA_VERSION,
+                    platform: TunPlatform::Linux,
+                    supported: true,
+                    can_rebuild: true,
+                    reasons: Vec::new(),
+                };
+            })
+            .await;
+
+        let bus = crate::node::spawn_command_bus_with_runtime(
+            harness.state.clone(),
+            harness.registry.clone(),
+            harness.events.clone(),
+            harness.services.clone(),
+            harness.runtime.clone(),
+            harness.configs.clone(),
+        );
+        let owner_context = NodeCommandContext::local_owner(self_node_id.clone(), "local_cli");
+
+        // 1. GetSnapshot populates traffic_routing_page and reports Unavailable observation while idle.
+        let snapshot_res = bus
+            .execute(
+                owner_context.clone(),
+                NodeCommandRequest::new(1, NodeCommand::GetSnapshot),
+            )
+            .await
+            .expect("submit GetSnapshot");
+        let snapshot = match snapshot_res.outcome {
+            NodeCommandOutcome::Snapshot(snapshot) => *snapshot,
+            other => panic!("expected Snapshot, got {other:?}"),
+        };
+        let initial_page = snapshot
+            .traffic_routing_page
+            .expect("traffic_routing_page must be projected");
+        assert_eq!(initial_page.authority_revision, 1);
+        assert!(initial_page.can_edit);
+        assert!(matches!(
+            initial_page.observation,
+            TrafficRoutingObservation::Unavailable { .. }
+        ));
+
+        // 2. GetTrafficPolicy returns baseline revision 1.
+        let current = match bus
+            .execute(
+                owner_context.clone(),
+                NodeCommandRequest::new(2, NodeCommand::GetTrafficPolicy),
+            )
+            .await
+            .expect("submit GetTrafficPolicy")
+            .outcome
+        {
+            NodeCommandOutcome::TrafficPolicy(current) => current,
+            other => panic!("expected TrafficPolicy, got {other:?}"),
+        };
+        assert_eq!(current.revision, 1);
+
+        // Start a live fake network session so ApplyTrafficPolicy + VerifyTrafficPolicy
+        // actually traverse the session control channel and activate observation.
+        start_fake_network(&harness, "traffic-policy-net").await;
+
+        let reject_draft = TrafficPolicyDraft {
+            node_id: self_node_id.clone(),
+            default_policy: TrafficDefaultPolicy {
+                action: TrafficAction::Direct,
+                confirmed_by: TrafficDefaultConfirmedBy::Owner,
+                confirmed_at_unix_ms: 100,
+            },
+            failure_policy: TrafficFailurePolicy::fail_closed(),
+            rules: vec![TrafficRule {
+                rule_id: TrafficRuleId::from_public_key(b"rule-block-https"),
+                priority: 1,
+                enabled: true,
+                matcher: TrafficMatch {
+                    destination_cidrs: vec![IpCidr::parse("203.0.113.0/24").expect("cidr")],
+                    destination_ports: vec![PortRange {
+                        start: 443,
+                        end: 443,
+                    }],
+                    protocols: vec![TrafficProtocol::Tcp],
+                    ..TrafficMatch::default()
+                },
+                action: TrafficAction::Reject,
+                description: "block test cidr https".into(),
+            }],
+        };
+
+        // 3. PreviewTrafficPolicy computes diff and candidate revision 2.
+        let preview = match bus
+            .execute(
+                owner_context.clone(),
+                NodeCommandRequest::new(
+                    3,
+                    NodeCommand::PreviewTrafficPolicy(NodePreviewTrafficPolicyCommand {
+                        expected_revision: 1,
+                        draft: reject_draft.clone(),
+                    }),
+                ),
+            )
+            .await
+            .expect("submit PreviewTrafficPolicy")
+            .outcome
+        {
+            NodeCommandOutcome::TrafficPolicyPreview(preview) => *preview,
+            other => panic!("expected TrafficPolicyPreview, got {other:?}"),
+        };
+        assert_eq!(preview.current_revision, 1);
+        assert_eq!(preview.candidate_revision, 2);
+        assert!(preview.has_changes);
+        assert!(preview.can_apply);
+
+        // 4. Unconfirmed risky apply is rejected cleanly.
+        let unconfirmed = bus
+            .execute(
+                owner_context.clone(),
+                NodeCommandRequest::new(
+                    4,
+                    NodeCommand::ApplyTrafficPolicy(NodeApplyTrafficPolicyCommand {
+                        expected_revision: 1,
+                        draft: reject_draft.clone(),
+                        confirm_risk: false,
+                    }),
+                ),
+            )
+            .await
+            .expect("submit unconfirmed apply");
+        match unconfirmed.outcome {
+            NodeCommandOutcome::Rejected(problem) => {
+                assert_eq!(problem.code, NodeProblemCode::InvalidRequest);
+                assert_eq!(
+                    problem.message_key,
+                    "traffic_policy.error.risk_confirmation_required"
+                );
+            }
+            other => panic!("expected risk confirmation rejection, got {other:?}"),
+        }
+
+        // 5. Confirmed apply succeeds, advances revision to 2, verifies on live session,
+        //    and switches observation to Available (0 observed hits so far).
+        let applied = match bus
+            .execute(
+                owner_context.clone(),
+                NodeCommandRequest::new(
+                    5,
+                    NodeCommand::ApplyTrafficPolicy(NodeApplyTrafficPolicyCommand {
+                        expected_revision: 1,
+                        draft: reject_draft.clone(),
+                        confirm_risk: true,
+                    }),
+                ),
+            )
+            .await
+            .expect("submit confirmed apply")
+            .outcome
+        {
+            NodeCommandOutcome::TrafficPolicyApplied(applied) => *applied,
+            other => panic!("expected TrafficPolicyApplied, got {other:?}"),
+        };
+        assert_eq!(applied.revision, 2);
+        assert!(!applied.no_op);
+        let updated_page = harness
+            .state
+            .snapshot()
+            .await
+            .traffic_routing_page
+            .expect("updated page");
+        assert_eq!(updated_page.authority_revision, 2);
+        assert_eq!(
+            updated_page.workflow,
+            TrafficRoutingWorkflowState::Applied { revision: 2 }
+        );
+        assert!(matches!(
+            updated_page.observation,
+            TrafficRoutingObservation::Available {
+                observed_flow_count: 0,
+                ..
+            }
+        ));
+
+        // 6. Stale revision apply returns Conflict with revision_conflict metadata.
+        let stale = bus
+            .execute(
+                owner_context.clone(),
+                NodeCommandRequest::new(
+                    6,
+                    NodeCommand::ApplyTrafficPolicy(NodeApplyTrafficPolicyCommand {
+                        expected_revision: 1,
+                        draft: reject_draft.clone(),
+                        confirm_risk: true,
+                    }),
+                ),
+            )
+            .await
+            .expect("submit stale apply");
+        match stale.outcome {
+            NodeCommandOutcome::Rejected(problem) => {
+                assert_eq!(problem.code, NodeProblemCode::Conflict);
+            }
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+
+        // 7. History, rollback preview, and rollback restore rev 1 as rev 3.
+        let history = match bus
+            .execute(
+                owner_context.clone(),
+                NodeCommandRequest::new(7, NodeCommand::GetTrafficPolicyHistory),
+            )
+            .await
+            .expect("submit history")
+            .outcome
+        {
+            NodeCommandOutcome::TrafficPolicyHistory(history) => *history,
+            other => panic!("expected TrafficPolicyHistory, got {other:?}"),
+        };
+        assert_eq!(history.current_revision, 2);
+        assert_eq!(history.entries.len(), 1);
+
+        let rollback_preview = match bus
+            .execute(
+                owner_context.clone(),
+                NodeCommandRequest::new(
+                    8,
+                    NodeCommand::PreviewTrafficPolicyRollback(
+                        NodePreviewTrafficPolicyRollbackCommand {
+                            expected_revision: 2,
+                            target_revision: 1,
+                        },
+                    ),
+                ),
+            )
+            .await
+            .expect("submit preview rollback")
+            .outcome
+        {
+            NodeCommandOutcome::TrafficPolicyPreview(preview) => *preview,
+            other => panic!("expected rollback preview, got {other:?}"),
+        };
+        assert_eq!(rollback_preview.rollback_target_revision, Some(1));
+        assert!(rollback_preview.candidate.rules.is_empty());
+
+        let rolled_back = match bus
+            .execute(
+                owner_context.clone(),
+                NodeCommandRequest::new(
+                    9,
+                    NodeCommand::RollbackTrafficPolicy(NodeRollbackTrafficPolicyCommand {
+                        expected_revision: 2,
+                        target_revision: 1,
+                        confirm_risk: true,
+                    }),
+                ),
+            )
+            .await
+            .expect("submit rollback")
+            .outcome
+        {
+            NodeCommandOutcome::TrafficPolicyRolledBack(result) => *result,
+            other => panic!("expected TrafficPolicyRolledBack, got {other:?}"),
+        };
+        assert_eq!(rolled_back.revision, 3);
+        assert!(rolled_back.policy.rules.is_empty());
+
+        // 8. Unsupported application and domain matchers fail closed with Unsupported.
+        let app_draft = TrafficPolicyDraft {
+            node_id: self_node_id.clone(),
+            default_policy: TrafficDefaultPolicy {
+                action: TrafficAction::Direct,
+                confirmed_by: TrafficDefaultConfirmedBy::Owner,
+                confirmed_at_unix_ms: 100,
+            },
+            failure_policy: TrafficFailurePolicy::fail_closed(),
+            rules: vec![TrafficRule {
+                rule_id: TrafficRuleId::from_public_key(b"rule-app"),
+                priority: 1,
+                enabled: true,
+                matcher: TrafficMatch {
+                    applications: vec![ApplicationIdentity::ExecutablePath("/usr/bin/curl".into())],
+                    ..TrafficMatch::default()
+                },
+                action: TrafficAction::Reject,
+                description: "app matcher".into(),
+            }],
+        };
+        match bus
+            .execute(
+                owner_context.clone(),
+                NodeCommandRequest::new(
+                    10,
+                    NodeCommand::PreviewTrafficPolicy(NodePreviewTrafficPolicyCommand {
+                        expected_revision: 3,
+                        draft: app_draft,
+                    }),
+                ),
+            )
+            .await
+            .expect("submit app matcher")
+            .outcome
+        {
+            NodeCommandOutcome::Rejected(problem) => {
+                assert_eq!(problem.code, NodeProblemCode::Unsupported);
+            }
+            other => panic!("application matcher must fail closed, got {other:?}"),
+        }
+
+        let domain_draft = TrafficPolicyDraft {
+            node_id: self_node_id.clone(),
+            default_policy: TrafficDefaultPolicy {
+                action: TrafficAction::Direct,
+                confirmed_by: TrafficDefaultConfirmedBy::Owner,
+                confirmed_at_unix_ms: 100,
+            },
+            failure_policy: TrafficFailurePolicy::fail_closed(),
+            rules: vec![TrafficRule {
+                rule_id: TrafficRuleId::from_public_key(b"rule-domain"),
+                priority: 1,
+                enabled: true,
+                matcher: TrafficMatch {
+                    domain_suffixes: vec![DomainSuffix::parse("example.com").expect("suffix")],
+                    ..TrafficMatch::default()
+                },
+                action: TrafficAction::Reject,
+                description: "domain matcher".into(),
+            }],
+        };
+        match bus
+            .execute(
+                owner_context.clone(),
+                NodeCommandRequest::new(
+                    11,
+                    NodeCommand::PreviewTrafficPolicy(NodePreviewTrafficPolicyCommand {
+                        expected_revision: 3,
+                        draft: domain_draft,
+                    }),
+                ),
+            )
+            .await
+            .expect("submit domain matcher")
+            .outcome
+        {
+            NodeCommandOutcome::Rejected(problem) => {
+                assert_eq!(problem.code, NodeProblemCode::Unsupported);
+            }
+            other => panic!("domain matcher must fail closed, got {other:?}"),
+        }
+
+        // 9. Without TUN readiness, routing to an Exit target fails closed with Unsupported.
+        harness
+            .state
+            .update(|snapshot| {
+                snapshot.tun_capabilities = TunCapabilities {
+                    schema_version: crate::tun::TUN_CAPABILITY_SCHEMA_VERSION,
+                    platform: TunPlatform::Linux,
+                    supported: true,
+                    can_rebuild: false,
+                    reasons: vec![TunCapabilityReason::PermissionDenied],
+                };
+                snapshot
+                    .exit_selections
+                    .push(crate::node::NodeExitSelectionSnapshot {
+                        network_id: NetworkId::from_public_key(b"net-1"),
+                        policy_revision: 1,
+                        policy: None,
+                        resolution: Some(fuckipv6_common::domain::ExitSelectionResolution {
+                            policy_revision: 1,
+                            subject: self_node_id.clone(),
+                            mode: fuckipv6_common::domain::ExitSelectionMode::MemberChoice,
+                            default_exit: None,
+                            fixed_exit: None,
+                            candidates: Vec::new(),
+                            selectable_exits: vec![exit_node_id.clone()],
+                            selected_default: None,
+                        }),
+                        directory_generated_at_unix_ms: Some(1_000),
+                        directory_received_at_unix_ms: Some(1_000),
+                        evaluated_at_unix_ms: 1_000,
+                        reason_code: None,
+                    });
+            })
+            .await;
+        let exit_draft = TrafficPolicyDraft {
+            node_id: self_node_id,
+            default_policy: TrafficDefaultPolicy {
+                action: TrafficAction::Exit(exit_node_id),
+                confirmed_by: TrafficDefaultConfirmedBy::Owner,
+                confirmed_at_unix_ms: 100,
+            },
+            failure_policy: TrafficFailurePolicy::fail_closed(),
+            rules: Vec::new(),
+        };
+        match bus
+            .execute(
+                owner_context,
+                NodeCommandRequest::new(
+                    12,
+                    NodeCommand::PreviewTrafficPolicy(NodePreviewTrafficPolicyCommand {
+                        expected_revision: 3,
+                        draft: exit_draft,
+                    }),
+                ),
+            )
+            .await
+            .expect("submit exit without tun")
+            .outcome
+        {
+            NodeCommandOutcome::Rejected(problem) => {
+                assert_eq!(problem.code, NodeProblemCode::Unsupported);
+            }
+            other => panic!("Exit target without TUN must fail closed, got {other:?}"),
+        }
 
         harness.shutdown().await;
     }

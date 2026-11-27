@@ -143,6 +143,18 @@ pub(crate) enum RuntimeCommand {
     LocalExitStatus {
         reply: oneshot::Sender<Result<LocalExitRuntimeStatus, RuntimeControlError>>,
     },
+    ApplyTrafficPolicy {
+        policy: Box<fuckipv6_common::domain::TrafficPolicy>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    VerifyTrafficPolicy {
+        expected_revision: u64,
+        expected_content_hash: fuckipv6_common::domain::ContentHash,
+        reply: oneshot::Sender<Result<bool, String>>,
+    },
+    TrafficPolicyObservation {
+        reply: oneshot::Sender<fuckipv6_common::domain::TrafficRoutingObservation>,
+    },
     Disconnect {
         reply: oneshot::Sender<Result<(), String>>,
     },

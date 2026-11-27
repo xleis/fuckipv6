@@ -24649,19 +24649,14 @@ mod tests {
 
     #[test]
     fn unavailable_manifest_actions_can_never_be_submitted() {
-        let unavailable = crate::node::node_ui_manifest()
+        let mut action = crate::node::node_ui_manifest()
             .pages
             .into_iter()
             .flat_map(|page| page.actions)
-            .filter(|action| action.backend_status == NodeUiBackendStatus::Unavailable)
-            .collect::<Vec<_>>();
-        assert!(
-            !unavailable.is_empty(),
-            "manifest must exercise unavailable actions"
-        );
-        for action in unavailable {
-            assert!(manifest_action_submit_disabled(&action, 0, false));
-        }
+            .find(|action| action.id == "get_traffic_policy")
+            .expect("routing manifest must define get_traffic_policy");
+        action.backend_status = NodeUiBackendStatus::Unavailable;
+        assert!(manifest_action_submit_disabled(&action, 0, false));
     }
 
     #[test]
@@ -24724,9 +24719,19 @@ mod tests {
         {
             let window = open_shell_window(cx, 1200.0, 900.0);
             let snapshot = fixture.snapshot.clone();
+            let mut unavailable_manifest = crate::node::node_ui_manifest();
+            for action in unavailable_manifest
+                .pages
+                .iter_mut()
+                .flat_map(|page| page.actions.iter_mut())
+            {
+                if action.id == "get_traffic_policy" {
+                    action.backend_status = NodeUiBackendStatus::Unavailable;
+                }
+            }
             window
                 .update(cx, |shell, _, cx| {
-                    shell.manifest = Some(crate::node::node_ui_manifest());
+                    shell.manifest = Some(unavailable_manifest);
                     shell.snapshot = snapshot;
                     shell.locale = Locale::En;
                     shell.selected_network = Some("home".into());
